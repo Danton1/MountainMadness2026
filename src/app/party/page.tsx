@@ -5,7 +5,18 @@ import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 import { Card, CardTitle } from "@/components/Card";
 import PageLoading from "@/components/PageLoading";
-import "@/lib/types"
+import {
+  BillCategory,
+  RecurrenceFreq,
+  DbEvent,
+  Party,
+  PartyMember,
+  Quest,
+  CompletionRow,
+  Profile,
+  MemberRow,
+  QuestCounts,
+} from "@/lib/types";
 
 function logSupabaseError(label: string, err: any) {
   if (!err) return;
