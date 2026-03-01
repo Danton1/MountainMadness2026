@@ -475,9 +475,6 @@ export default function BillsCalendar({
                   <option value="monthly">Monthly</option>
                   <option value="yearly">Yearly</option>
                 </select>
-                <div className="text-xs text-gray-500 mt-1">
-                  For MVP: store recurrence on the event row. (We can generate future instances later.)
-                </div>
               </div>
 
               <button

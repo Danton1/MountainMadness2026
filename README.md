@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🧪 Dr. Jekyll's CalendarQuest
 
-## Getting Started
+**Turn chaos into clarity. Transform your finances into a game.**
 
-First, run the development server:
+Managing your finances doesn’t have to be boring or overwhelming. With **Dr. Jekyll's CalendarQuest**, you can take control of your schedule, predict financial risks, and turn your financial habits into fun, gamified challenges. Whether it’s bills, birthdays, or social events, CalendarQuest helps you stay ahead and achieve your goals with ease.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## 🌟 Why CalendarQuest?
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Life is chaotic. Between deadlines, bills, and social events, it’s easy to lose track of what’s important. **CalendarQuest** is here to help you:
+- **Stay Organized**: Analyze your schedule and get a clear picture of your upcoming commitments.
+- **Plan Ahead**: Identify high-risk weeks with our unique **Chaos Index** and prepare for them in advance.
+- **Have Fun**: Turn financial discipline into a game with quests, challenges, and rewards.
+- **Stay Accountable**: Join groups, set shared goals, and motivate each other to stay on track.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 🔬 How It Works
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **Chaos Index**: CalendarQuest scans your schedule to calculate a Chaos Index, helping you identify weeks that need extra attention.
+2. **Gamified Challenges**: Transform your financial habits into fun quests that encourage consistency and discipline.
+3. **Accountability Groups**: Work with friends or peers to set shared goals, track progress, and celebrate achievements together.
+4. **Smart Predictions**: CalendarQuest predicts spending risks based on your schedule and helps you avoid financial pitfalls.
 
-## Learn More
+## 🎮 Why It’s Fun
 
-To learn more about Next.js, take a look at the following resources:
+- **Gamification**: Who said managing finances has to be boring? With CalendarQuest, every task becomes a quest, and every achievement feels like a win.
+- **Emoji-Powered Interface**: Bills and events are represented with fun emojis, making your schedule visually engaging and easy to understand.
+- **Peer Motivation**: Compete with friends or collaborate in groups to stay motivated and accountable.
+- **Simplicity Meets Power**: CalendarQuest is intuitive for beginners but packed with features for power users.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 🚀 Features
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- **📅 Chaos Index**: Analyze your schedule to identify high-risk weeks and plan ahead with confidence.
+- **🎯 Gamified Challenges**: Turn financial discipline into fun quests that help you build consistent saving habits.
+- **👥 Accountability Groups**: Join a group, set shared goals, and stay motivated with peer support and encouragement.
+- **💡 Smart Predictions**: Get insights into your spending risks and upcoming deadlines.
+- **🔔 Notifications**: Never miss a bill or event with timely reminders.
 
-## Deploy on Vercel
+## 🛠️ Built With
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **Frontend**: Next.js, TypeScript, TailwindCSS
+- **Backend**: Supabase + PostgreSQL for real-time data and authentication
+- **Deployment**: Vercel for fast and reliable hosting
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 📖 How to Use
+
+1. **Try the App**: Clone the repo, install dependencies (npm i) and run (npm run dev)
+2. **Add Events**: Add bills, deadlines, and other events to your calendar.
+3. **Track Your Chaos Index**: See how busy your week is and plan accordingly.
+4. **Complete Quests**: Turn your financial goals into fun challenges and earn rewards.
+5. **Collaborate**: Join accountability groups to stay motivated with friends.
+
+
+## 🎉 Why You’ll Love It
+
+CalendarQuest isn’t just another finance app; it’s a tool that makes managing your life fun and engaging. By combining gamification, smart predictions, and peer accountability, CalendarQuest transforms the way you approach your schedule and finances.
+
+
+## 📣 Join the Quest!
+
+Ready to turn chaos into clarity? Try **Dr. Jekyll's CalendarQuest** today and take the first step toward a more organized, stress-free life.
+
+## 🪙 Built for Mountain Madness – Dr. Jekyll Edition
+This project was created as part of the **Mountain Madness Hackathon**. I hope you enjoy using it as much as I enjoyed building it!

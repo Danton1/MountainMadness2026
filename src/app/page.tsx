@@ -58,7 +58,7 @@ export default function HomePage() {
           disabled={loading}
           className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-8 py-3 rounded-xl shadow-md"
         >
-          {loading ? "Loading..." : "🚀 Try the Demo"}
+          {loading ? "Loading..." : "🚀 Go to Dashboard!"}
         </button>
       </section>
 

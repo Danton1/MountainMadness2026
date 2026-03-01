@@ -534,10 +534,6 @@ const billCategoryTotals = useMemo(() => {
               ))}
             </ul>
           )}
-          <div className="mt-4 text-xs text-gray-500">
-            Next: store bill amounts in <span className="font-mono">events.meta</span> or create a{" "}
-            <span className="font-mono">bills</span> table.
-          </div>
         </Card>
 
         <Card>

@@ -341,9 +341,6 @@ if (!userId) {
           <div className="text-4xl font-bold text-emerald-700">
             {stats.pointsEarned}
           </div>
-          <div className="text-sm text-gray-600 mt-1">
-            Saved to Supabase in real time.
-          </div>
         </Card>
 
         <Card>
