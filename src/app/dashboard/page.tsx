@@ -9,6 +9,8 @@ import Stat from "@/components/Stat";
 import BillsCalendar from "@/components/BillsCalendar";
 import PageLoading from "@/components/PageLoading";
 import type { DbEvent, Party, PartyMember, Profile, QuestCounts, CompletionRow } from "@/lib/types";
+import { expandBillOccurrences } from "@/lib/utils/bills";
+import { BILL_EMOJI } from "@/lib/utils/bills";
 import {
   clamp,
   computeWeekRisk,
@@ -28,6 +30,50 @@ export default function DashboardPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+
+  const [addBillOpen, setAddBillOpen] = useState<{ open: boolean; date: string }>({ open: false, date: "" });
+
+const [billForm, setBillForm] = useState({
+title: "",
+amount: "",
+category: "Others",
+recur_freq: "none",
+recur_interval: 1,
+recur_until: "", // optional YYYY-MM-DD
+});
+
+const createBillEvent = async () => {
+    if (!userId) return;
+  
+    const amount_cents = Math.max(0, Math.round((Number(billForm.amount) || 0) * 100));
+    const start_at = new Date(addBillOpen.date + "T12:00:00Z").toISOString(); // noon UTC avoids date shift bugs
+    const endAt = start_at;
+  
+    const { error } = await supabase.from("events").insert({
+      user_id: userId,
+      title: billForm.title.trim() || "[BILL] Untitled",
+      type: "bill",
+      start_at: start_at,
+      end_at: endAt,
+  
+      amount_cents,
+      bill_category: billForm.category,
+      recur_freq: billForm.recur_freq,
+      recur_interval: billForm.recur_freq === "none" ? 1 : Number(billForm.recur_interval) || 1,
+      recur_until: billForm.recur_until ? billForm.recur_until : null,
+    });
+  
+    if (error) {
+      logSupabaseError("insert bill event failed", error);
+      return;
+    }
+  
+    // refresh events + close
+    await loadEventsNext7Days(userId);
+    setAddBillOpen({ open: false, date: "" });
+    setBillForm({ title: "", amount: "", category: "Others", recur_freq: "none", recur_interval: 1, recur_until: "" });
+  };
+
 
   const [myParties, setMyParties] = useState<Party[]>([]);
   const [activeParty, setActiveParty] = useState<Party | null>(null);
@@ -76,6 +122,23 @@ export default function DashboardPage() {
     }
   
     setAuthLoading(false);
+  };
+
+  const deleteBillEvent = async (eventId: string) => {
+    if (!userId) return;
+  
+    const { error } = await supabase
+      .from("events")
+      .delete()
+      .eq("id", eventId)
+      .eq("user_id", userId);
+  
+    if (error) {
+      logSupabaseError("delete bill failed", error);
+      throw error;
+    }
+  
+    await loadEventsNext7Days(userId);
   };
 
   const loadMyParties = async (uid: string) => {
@@ -161,11 +224,77 @@ export default function DashboardPage() {
     setPartyAgg({ points, saved_cents, completionCount: rows.length });
   };
 
-  const billEvents = useMemo(() => {
-    return events
-      .filter((e) => e.type === "bill")
-      .map((e) => ({ id: e.id, title: e.title, start_at: e.start_at }));
-  }, [events]);
+  const createBillFromCalendar = async (payload: {
+    title: string;
+    start_at: string;
+    amount_cents: number;
+    category: string;
+    recurrence: string;
+  }) => {
+    if (!userId) return;
+  
+    const { error } = await supabase.from("events").insert({
+      user_id: userId,
+      title: payload.title.trim() || "Untitled bill",
+      type: "bill",
+      start_at: payload.start_at,
+      end_at: payload.start_at,
+  
+      amount_cents: payload.amount_cents,
+      bill_category: payload.category,
+      recur_freq: payload.recurrence,   // <-- matches your "recur_freq" column naming
+      recur_interval: payload.recurrence === "none" ? 1 : 1,
+      recur_until: null,
+    });
+  
+    if (error) {
+      logSupabaseError("insert bill event failed", error);
+      throw error; // so calendar modal can keep open + show saving stopped
+    }
+  
+    await loadEventsNext7Days(userId);
+  };
+
+const billOccurrences = useMemo(() => {
+  const start = new Date(); // Start from today
+  const end = new Date();
+  end.setMonth(end.getMonth() + 12); // Include up to a year
+  return expandBillOccurrences(events, start.toISOString(), end.toISOString());
+}, [events]);
+
+const billEvents = useMemo(() => {
+    return billOccurrences.map((b) => ({
+      id: b.id,
+      title: `${(BILL_EMOJI as any)[b.category] ?? "💸"} ${b.title}`,
+      start_at: b.start_at,
+      category: b.category,
+      amount_cents: b.amount_cents,
+    }));
+  }, [billOccurrences]);
+
+const billCategoryTotals = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const b of billOccurrences) {
+      totals[b.category] = (totals[b.category] ?? 0) + b.amount_cents;
+    }
+    return totals;
+  }, [billOccurrences]);
+  
+  const billAlert = useMemo(() => {
+    const entries = Object.entries(billCategoryTotals);
+    const total = entries.reduce((s, [, v]) => s + v, 0);
+    if (!total) return null;
+  
+    entries.sort((a, b) => b[1] - a[1]);
+    const [topCat, topVal] = entries[0];
+    const share = topVal / total;
+  
+    // tweak threshold if you want
+    if (share >= 0.45 && topVal >= 5000) {
+      return { topCat, topVal, share };
+    }
+    return null;
+  }, [billCategoryTotals]);
 
   const loadEventsNext7Days = async (uid: string) => {
     const { start, end } = next7DaysISO();
@@ -519,7 +648,11 @@ export default function DashboardPage() {
         </Card>
       </div>
       <div className="max-w-5xl mx-auto grid mt-8 gap-6">
-        <BillsCalendar bills={billEvents} />
+      <BillsCalendar
+        bills={billEvents}
+        onCreateBill={createBillFromCalendar}
+        onDeleteBill={deleteBillEvent}
+      />
       </div>
 
     </main>

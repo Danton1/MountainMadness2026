@@ -32,30 +32,24 @@ export default function HomePage() {
         </h1>
 
         <p className="text-lg text-gray-700 max-w-2xl mb-6">
-          Transform your chaotic, multi-calendar life into actionable financial
-          insights. Predict risky weeks, complete financial quests, and win
-          together with your lab group.
+          Take control of your finances with CalendarQuest, the app that turns your chaotic schedule into actionable insights. Predict financial risks, complete gamified challenges, and achieve your goals with accountability and ease.
         </p>
 
         <div className="bg-white shadow-lg rounded-xl p-6 max-w-xl mb-8 border border-emerald-100">
           <h2 className="text-xl font-semibold text-emerald-600 mb-2">
-            💡 The Problem
+            💡 Why CalendarQuest?
           </h2>
           <p className="text-gray-600 text-sm">
-            Students and busy professionals don’t fail budgeting because they
-            lack numbers, they fail because life gets chaotic. Deadlines,
-            birthdays, social events, bills, paydays. It’s unpredictable.
+            Managing finances isn’t just about numbers, it’s about managing life. With deadlines, bills, birthdays, and social events, it’s easy to lose track. CalendarQuest helps you stay ahead by analyzing your schedule and turning chaos into clarity.
           </p>
         </div>
 
         <div className="bg-white shadow-lg rounded-xl p-6 max-w-xl mb-8 border border-emerald-100">
           <h2 className="text-xl font-semibold text-emerald-600 mb-2">
-            🔬 Our Solution
+            🔬 How It Works
           </h2>
           <p className="text-gray-600 text-sm">
-            CalendarQuest analyzes your week, calculates a Chaos Index, predicts
-            spending risk, and turns your financial discipline into
-            gamified quests, backed by peer accountability.
+            CalendarQuest scans your week to calculate a Chaos Index, predicts spending risks, and transforms your financial habits into fun, gamified quests. With peer accountability, you’ll stay motivated and on track.
           </p>
         </div>
 
@@ -64,7 +58,7 @@ export default function HomePage() {
           disabled={loading}
           className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-8 py-3 rounded-xl shadow-md"
         >
-          {loading ? "Loading Demo Week..." : "🚀 Enter Demo Mode"}
+          {loading ? "Loading..." : "🚀 Try the Demo"}
         </button>
       </section>
 
@@ -73,15 +67,15 @@ export default function HomePage() {
         <div className="max-w-5xl mx-auto grid md:grid-cols-3 gap-8">
           <FeatureCard
             title="📅 Chaos Index"
-            description="Analyzes deadlines, social events, and bills to predict risky spending weeks."
+            description="Analyze your schedule to identify high-risk weeks and plan ahead with confidence."
           />
           <FeatureCard
-            title="🎯 Financial Quests"
-            description="Daily and weekly challenges designed to build small, consistent saving habits."
+            title="🎯 Gamified Challenges"
+            description="Turn financial discipline into fun quests that help you build consistent saving habits."
           />
           <FeatureCard
-            title="👥 Lab Groups"
-            description="Join a savings party and hit shared goals together through accountability."
+            title="👥 Accountability Groups"
+            description="Join a group, set shared goals, and stay motivated with peer support and encouragement."
           />
         </div>
       </section>
