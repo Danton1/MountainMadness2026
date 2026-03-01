@@ -14,6 +14,14 @@ type Party = {
 
 type MemberRow = {
   user_id: string;
+  profiles: {
+    display_name: string | null;
+  } | null;
+};
+
+type QuestCounts = {
+  dailyCount: number;
+  weeklyCount: number;
 };
 
 type Quest = {
@@ -23,38 +31,41 @@ type Quest = {
 
 type CompletionRow = {
   user_id: string;
-  completed_day: string; // YYYY-MM-DD
+  completed_day: string;
   quests: Quest | null;
 };
 
 function logSupabaseError(label: string, err: any) {
-  if (!err) {
-    console.error(label, err);
-    return;
-  }
+  if (!err) return;
   console.error(label, {
     message: err.message,
     details: err.details,
     hint: err.hint,
     code: err.code,
     status: err.status,
-    name: err.name,
-    stack: err.stack,
     raw: err,
   });
 }
 
 function formatMoneyCents(cents: number) {
-  return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "CAD" });
+  return (cents / 100).toLocaleString(undefined, {
+    style: "currency",
+    currency: "CAD",
+  });
 }
 
 function weekStartUTCDateString(d = new Date()) {
-  // Monday start
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = date.getUTCDay(); // 0 Sun ... 6 Sat
-  const diff = day === 0 ? -6 : 1 - day; // shift to Monday
+  const day = date.getUTCDay();
+  const diff = day === 0 ? -6 : 1 - day;
   date.setUTCDate(date.getUTCDate() + diff);
-  return date.toISOString().slice(0, 10); // YYYY-MM-DD
+  return date.toISOString().slice(0, 10);
+}
+
+function todayUTCDateString(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    .toISOString()
+    .slice(0, 10);
 }
 
 function randomJoinCode(len = 6) {
@@ -78,16 +89,20 @@ export default function PartyPage() {
     { user_id: string; name: string; points: number; saved_cents: number }[]
   >([]);
 
-  // Create / Join form (Create inputs start empty so placeholders work)
   const [mode, setMode] = useState<"create" | "join">("create");
   const [nameInput, setNameInput] = useState("");
   const [goalInput, setGoalInput] = useState("");
-  const [joinCodeInput, setJoinCodeInput] = useState(""); // only for JOIN
+  const [joinCodeInput, setJoinCodeInput] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Invite modal
   const [inviteOpen, setInviteOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  const [questCounts, setQuestCounts] = useState<QuestCounts>({ dailyCount: 0, weeklyCount: 0 });
+  const [partyCompletionCount, setPartyCompletionCount] = useState(0);
+
+  const [cheeredToday, setCheeredToday] = useState<Set<string>>(new Set());
+  const [cheerCountsToday, setCheerCountsToday] = useState<Record<string, number>>({});
 
   const refreshAll = async () => {
     const { data: auth, error: authErr } = await supabase.auth.getUser();
@@ -97,37 +112,44 @@ export default function PartyPage() {
     setUserId(uid);
     if (!uid) return;
 
-    // Parties via membership
     const { data: pm, error: pmErr } = await supabase
       .from("party_members")
       .select("party_id, parties:parties(id,name,join_code,weekly_goal_cents,created_by)")
       .eq("user_id", uid);
 
     if (pmErr) {
-      logSupabaseError("party_members select (for my parties) failed", pmErr);
+      logSupabaseError("party_members select (my parties) failed", pmErr);
       return;
     }
 
-    const parties = (pm ?? [])
-      .map((r: any) => r.parties as Party)
-      .filter(Boolean);
-
+    const parties = (pm ?? []).map((r: any) => r.parties as Party).filter(Boolean);
     setMyParties(parties);
 
-    if (!activeParty && parties.length > 0) {
-      setActiveParty(parties[0]);
-    }
+    if (!activeParty && parties.length > 0) setActiveParty(parties[0]);
+    if (activeParty && !parties.some((p) => p.id === activeParty.id)) setActiveParty(parties[0] ?? null);
   };
 
-  const refreshMembersAndLeaderboard = async (party: Party, uid: string | null) => {
-    // Members (NO profiles join here — keeps RLS simpler)
+  const fetchQuestCounts = async () => {
+    const { data, error } = await supabase.from("quests").select("kind");
+    if (error) {
+      logSupabaseError("quests select (counts) failed", error);
+      setQuestCounts({ dailyCount: 0, weeklyCount: 0 });
+      return;
+    }
+    const kinds = (data ?? []) as { kind: "daily" | "weekly" }[];
+    const dailyCount = kinds.filter((k) => k.kind === "daily").length;
+    const weeklyCount = kinds.filter((k) => k.kind === "weekly").length;
+    setQuestCounts({ dailyCount, weeklyCount });
+  };
+
+  const refreshMembersAndStats = async (party: Party, uid: string | null) => {
     const { data: mem, error: memErr } = await supabase
       .from("party_members")
       .select("user_id, profiles:profiles(display_name)")
       .eq("party_id", party.id);
 
     if (memErr) {
-      logSupabaseError("party_members select (members list) failed", memErr);
+      logSupabaseError("party_members select (members) failed", memErr);
       return;
     }
 
@@ -137,12 +159,13 @@ export default function PartyPage() {
     const ids = memberRows.map((m) => m.user_id);
     if (ids.length === 0) {
       setLeaderboard([]);
+      setPartyCompletionCount(0);
+      setCheeredToday(new Set());
+      setCheerCountsToday({});
       return;
     }
 
-    // Completions this week for those members
     const weekStart = weekStartUTCDateString();
-
     const { data: comps, error: compErr } = await supabase
       .from("quest_completions")
       .select("user_id, completed_day, quests:quests(reward_points,est_saved_cents)")
@@ -150,13 +173,13 @@ export default function PartyPage() {
       .gte("completed_day", weekStart);
 
     if (compErr) {
-      logSupabaseError("quest_completions select (leaderboard) failed", compErr);
+      logSupabaseError("quest_completions select (party stats) failed", compErr);
       return;
     }
 
     const rows = (comps ?? []) as unknown as CompletionRow[];
+    setPartyCompletionCount(rows.length);
 
-    // Aggregate
     const agg = new Map<string, { points: number; saved_cents: number }>();
     for (const r of rows) {
       const cur = agg.get(r.user_id) ?? { points: 0, saved_cents: 0 };
@@ -165,24 +188,60 @@ export default function PartyPage() {
       agg.set(r.user_id, cur);
     }
 
-    const board = ids.map((id) => ({
-      user_id: id,
-      name: id === uid ? "You" : id.slice(0, 8),
-      points: agg.get(id)?.points ?? 0,
-      saved_cents: agg.get(id)?.saved_cents ?? 0,
+    const board = memberRows.map((m) => ({
+      user_id: m.user_id,
+      name: m.user_id === uid ? "You" : (m.profiles?.display_name ?? m.user_id.slice(0, 8)),
+      points: agg.get(m.user_id)?.points ?? 0,
+      saved_cents: agg.get(m.user_id)?.saved_cents ?? 0,
     }));
 
     board.sort((a, b) => b.saved_cents - a.saved_cents || b.points - a.points);
     setLeaderboard(board);
+
+    const today = todayUTCDateString();
+
+    const { data: myCheers, error: myCheersErr } = await supabase
+      .from("cheers")
+      .select("to_user_id")
+      .eq("party_id", party.id)
+      .eq("from_user_id", uid ?? "")
+      .eq("cheer_day", today);
+
+    if (myCheersErr) {
+      logSupabaseError("cheers select (my cheers) failed", myCheersErr);
+      setCheeredToday(new Set());
+    } else {
+      const set = new Set<string>((myCheers ?? []).map((r: any) => r.to_user_id as string));
+      setCheeredToday(set);
+    }
+
+    const { data: todaysCheers, error: todaysCheersErr } = await supabase
+      .from("cheers")
+      .select("to_user_id")
+      .eq("party_id", party.id)
+      .eq("cheer_day", today);
+
+    if (todaysCheersErr) {
+      logSupabaseError("cheers select (today counts) failed", todaysCheersErr);
+      setCheerCountsToday({});
+    } else {
+      const counts: Record<string, number> = {};
+      for (const r of todaysCheers ?? []) {
+        const id = (r as any).to_user_id as string;
+        counts[id] = (counts[id] ?? 0) + 1;
+      }
+      setCheerCountsToday(counts);
+    }
   };
 
   useEffect(() => {
     refreshAll();
+    fetchQuestCounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (activeParty) refreshMembersAndLeaderboard(activeParty, userId);
+    if (activeParty) refreshMembersAndStats(activeParty, userId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeParty, userId]);
 
@@ -192,9 +251,8 @@ export default function PartyPage() {
 
     try {
       const weekly_goal_cents = Math.max(1000, Math.round(((Number(goalInput) || 60) * 100)));
-      const partyName = nameInput.trim() || "My Lab Group";
+      const partyName = nameInput.trim() || "My Party";
 
-      // Always auto-generate and guarantee uniqueness by retrying on conflict
       let party: Party | null = null;
       for (let attempt = 0; attempt < 6; attempt++) {
         const join_code = randomJoinCode().toUpperCase();
@@ -215,15 +273,12 @@ export default function PartyPage() {
           break;
         }
 
-        // Unique violation -> try again
         if (error.code === "23505") continue;
-
-        // Other error -> bail
         throw error;
       }
 
       if (!party) {
-        console.error("Failed to generate unique join code after retries.");
+        console.error("Could not generate a unique join code after retries.");
         return;
       }
 
@@ -238,7 +293,6 @@ export default function PartyPage() {
       await refreshAll();
       setActiveParty(party);
 
-      // reset form
       setNameInput("");
       setGoalInput("");
       setMode("join");
@@ -265,12 +319,11 @@ export default function PartyPage() {
       if (pErr) throw pErr;
 
       const { error: mErr } = await supabase.from("party_members").insert({
-        party_id: party.id,
+        party_id: (party as Party).id,
         user_id: userId,
         role: "member",
       });
 
-      // Already joined -> ignore
       if (mErr && mErr.code !== "23505") throw mErr;
 
       await refreshAll();
@@ -306,12 +359,52 @@ export default function PartyPage() {
     }
   };
 
-  const progress = useMemo(() => {
+  const cheerMember = async (toUserId: string) => {
+    if (!userId || !activeParty) return;
+    if (toUserId === userId) return;
+
+    const today = todayUTCDateString();
+    try {
+      const { error } = await supabase.from("cheers").insert({
+        party_id: activeParty.id,
+        from_user_id: userId,
+        to_user_id: toUserId,
+        cheer_day: today,
+      });
+
+      if (error) {
+        if (error.code === "23505") {
+          setCheeredToday((prev) => new Set(prev).add(toUserId));
+          return;
+        }
+        throw error;
+      }
+
+      setCheeredToday((prev) => new Set(prev).add(toUserId));
+      setCheerCountsToday((prev) => ({
+        ...prev,
+        [toUserId]: (prev[toUserId] ?? 0) + 1,
+      }));
+    } catch (e) {
+      logSupabaseError("cheerMember failed", e);
+    }
+  };
+
+  const progressMoney = useMemo(() => {
     const goal = activeParty?.weekly_goal_cents ?? 6000;
     const totalSaved = leaderboard.reduce((s, r) => s + r.saved_cents, 0);
     const pct = goal === 0 ? 0 : Math.max(0, Math.min(100, Math.round((totalSaved / goal) * 100)));
     return { goal, totalSaved, pct };
   }, [activeParty, leaderboard]);
+
+  const progressQuests = useMemo(() => {
+    const memberCount = members.length;
+    const possiblePerMember = questCounts.dailyCount * 7 + questCounts.weeklyCount;
+    const totalPossible = memberCount * possiblePerMember;
+    const pct =
+      totalPossible === 0 ? 0 : Math.max(0, Math.min(100, Math.round((partyCompletionCount / totalPossible) * 100)));
+    return { memberCount, possiblePerMember, totalPossible, completed: partyCompletionCount, pct };
+  }, [members.length, questCounts.dailyCount, questCounts.weeklyCount, partyCompletionCount]);
 
   const copyInvite = async () => {
     if (!activeParty) return;
@@ -325,60 +418,75 @@ export default function PartyPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-10">
-      <div className="max-w-5xl mx-auto flex items-start justify-between gap-4 mb-8">
+    <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-4 sm:px-6 py-8 sm:py-10">
+      <div className="max-w-5xl mx-auto flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 sm:mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-emerald-700">👥 Lab Group</h1>
-          <p className="text-gray-600">
-            Real users, real parties, real progress. Weekly totals come from quest completions.
-          </p>
+          <h1 className="text-3xl font-bold text-emerald-700">👥 Party</h1>
+          <p className="text-gray-600">Real users, real parties, real progress.</p>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2 sm:justify-end">
           <Link
             href="/dashboard"
-            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-5 py-3 rounded-xl shadow-md border border-emerald-200"
+            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md border border-emerald-200"
           >
             ← Dashboard
           </Link>
           <Link
             href="/quests"
-            className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-5 py-3 rounded-xl shadow-md"
+            className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md"
           >
             🎯 Quests
           </Link>
           <button
             onClick={() => setInviteOpen(true)}
             disabled={!activeParty}
-            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-5 py-3 rounded-xl shadow-md border border-emerald-200 disabled:opacity-50"
+            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md border border-emerald-200 disabled:opacity-50"
           >
             📩 Invite
           </button>
         </div>
       </div>
 
-      <div className="max-w-5xl mx-auto grid md:grid-cols-3 gap-6 mb-8">
+      <div className="max-w-5xl mx-auto grid lg:grid-cols-3 gap-6 mb-8">
         <Card>
           <CardTitle>🏁 Weekly Goal</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{progress.pct}%</div>
+          <div className="text-4xl font-bold text-emerald-700">{progressMoney.pct}%</div>
           <div className="text-sm text-gray-600 mt-1">
-            Saved: <span className="font-semibold">{formatMoneyCents(progress.totalSaved)}</span> /{" "}
-            <span className="font-semibold">{formatMoneyCents(progress.goal)}</span>
+            Saved: <span className="font-semibold">{formatMoneyCents(progressMoney.totalSaved)}</span> /{" "}
+            <span className="font-semibold">{formatMoneyCents(progressMoney.goal)}</span>
           </div>
           <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
-            <div className="h-2 bg-emerald-600" style={{ width: `${progress.pct}%` }} />
+            <div className="h-2 bg-emerald-600" style={{ width: `${progressMoney.pct}%` }} />
           </div>
-          {activeParty ? (
-            <div className="mt-3 text-xs text-gray-500">
-              Active: <span className="font-semibold">{activeParty.name}</span>
-            </div>
-          ) : (
-            <div className="mt-3 text-xs text-gray-500">No active party selected.</div>
-          )}
+          <div className="mt-3 text-xs text-gray-500">
+            {activeParty ? (
+              <>
+                Active: <span className="font-semibold">{activeParty.name}</span>
+              </>
+            ) : (
+              "No active party selected."
+            )}
+          </div>
         </Card>
 
         <Card>
-          <CardTitle>🧪 Your Parties</CardTitle>
+          <CardTitle>✅ Party Quest Completion</CardTitle>
+          <div className="text-4xl font-bold text-emerald-700">{progressQuests.pct}%</div>
+          <div className="text-sm text-gray-600 mt-1">
+            Completed: <span className="font-semibold">{progressQuests.completed}</span> /{" "}
+            <span className="font-semibold">{progressQuests.totalPossible}</span>
+          </div>
+          <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
+            <div className="h-2 bg-emerald-600" style={{ width: `${progressQuests.pct}%` }} />
+          </div>
+          <div className="mt-3 text-xs text-gray-500">
+            {progressQuests.memberCount} members • {questCounts.dailyCount} daily • {questCounts.weeklyCount} weekly
+          </div>
+        </Card>
+
+        <Card>
+          <CardTitle>💼 Your Parties</CardTitle>
           {myParties.length === 0 ? (
             <p className="text-sm text-gray-600">You’re not in any parties yet.</p>
           ) : (
@@ -403,7 +511,7 @@ export default function PartyPage() {
             </div>
           )}
 
-          <div className="mt-4 flex gap-2">
+          <div className="mt-4 flex flex-wrap gap-2">
             <button
               onClick={refreshAll}
               disabled={busy}
@@ -420,7 +528,9 @@ export default function PartyPage() {
             </button>
           </div>
         </Card>
+      </div>
 
+      <div className="max-w-5xl mx-auto grid lg:grid-cols-2 gap-6 mb-8">
         <Card>
           <CardTitle>➕ Create / Join</CardTitle>
 
@@ -468,10 +578,6 @@ export default function PartyPage() {
                 />
               </Field>
 
-              <div className="text-xs text-gray-500">
-                Join code will be auto-generated. After creating, use <span className="font-semibold">Invite</span>.
-              </div>
-
               <button
                 onClick={createParty}
                 disabled={busy}
@@ -501,9 +607,49 @@ export default function PartyPage() {
             </div>
           )}
         </Card>
+
+        <Card>
+          <CardTitle>👥 Members</CardTitle>
+          {activeParty ? (
+            <div className="space-y-2">
+              {members.map((m) => {
+                const name = m.user_id === userId ? "You" : (m.profiles?.display_name ?? m.user_id.slice(0, 8));
+                const canCheer = !!userId && m.user_id !== userId && !cheeredToday.has(m.user_id);
+                const cheers = cheerCountsToday[m.user_id] ?? 0;
+
+                return (
+                  <div
+                    key={m.user_id}
+                    className="flex items-center justify-between gap-3 bg-white border border-emerald-100 rounded-xl px-4 py-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-800 truncate">{name}</div>
+                      <div className="text-xs text-gray-500">
+                        Cheers today: <span className="font-semibold">{cheers}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => cheerMember(m.user_id)}
+                        disabled={!canCheer}
+                        className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-3 py-2 rounded-xl shadow-md disabled:opacity-50"
+                        title={m.user_id === userId ? "You can’t cheer yourself" : canCheer ? "Cheer once per day" : "Already cheered today"}
+                      >
+                        👏 Cheer
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-600">Select a party to see members.</p>
+          )}
+        </Card>
       </div>
 
-      <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-6">
+      <div className="max-w-5xl mx-auto">
         <Card>
           <CardTitle>🏅 Leaderboard (This Week)</CardTitle>
           {activeParty ? (
@@ -514,47 +660,23 @@ export default function PartyPage() {
                     key={r.user_id}
                     className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3"
                   >
-                    <div>
-                      <div className="font-semibold text-gray-800">{r.name}</div>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-gray-800 truncate">{r.name}</div>
                       <div className="text-xs text-gray-500">{r.points} pts</div>
                     </div>
-                    <div className="font-semibold text-emerald-700">
-                      {formatMoneyCents(r.saved_cents)}
-                    </div>
+                    <div className="font-semibold text-emerald-700">{formatMoneyCents(r.saved_cents)}</div>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-gray-600">No completions yet this week. Go do some quests 😈</p>
+              <p className="text-sm text-gray-600">No completions yet this week. Go do some quests.</p>
             )
           ) : (
             <p className="text-sm text-gray-600">Select a party to view leaderboard.</p>
           )}
         </Card>
-
-        <Card>
-          <CardTitle>👥 Members</CardTitle>
-          {activeParty ? (
-            <div className="space-y-2">
-              {members.map((m) => (
-                <div
-                  key={m.user_id}
-                  className="flex items-center justify-between gap-3 bg-white border border-emerald-100 rounded-xl px-4 py-3"
-                >
-                  <div className="font-medium text-gray-800">
-                    {m.user_id === userId ? "You" : m.user_id.slice(0, 8)}
-                  </div>
-                  <div className="text-xs text-gray-500 font-mono">{m.user_id.slice(0, 8)}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-gray-600">Select a party to see members.</p>
-          )}
-        </Card>
       </div>
 
-      {/* Invite modal */}
       {inviteOpen && activeParty ? (
         <div
           className="fixed inset-0 bg-black/30 flex items-center justify-center px-4 z-50"
@@ -594,10 +716,6 @@ export default function PartyPage() {
                 {copied ? "Copied ✓" : "Copy"}
               </button>
             </div>
-
-            <div className="mt-4 text-xs text-gray-500">
-              Tip: open an incognito window, login with another email, and join using this code to demo real multiplayer.
-            </div>
           </div>
         </div>
       ) : null}
@@ -605,7 +723,6 @@ export default function PartyPage() {
   );
 }
 
-/* UI helpers */
 function Card({ children }: { children: React.ReactNode }) {
   return <div className="bg-white rounded-2xl shadow-lg border border-emerald-100 p-6">{children}</div>;
 }

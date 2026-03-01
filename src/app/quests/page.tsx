@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
 type Quest = {
@@ -32,6 +32,27 @@ function todayUTCDateString(d = new Date()) {
     .slice(0, 10);
 }
 
+function weekStartUTCDateString(d = new Date()) {
+  // Monday start, UTC
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = date.getUTCDay(); // 0 Sun ... 6 Sat
+  const diff = day === 0 ? -6 : 1 - day; // shift to Monday
+  date.setUTCDate(date.getUTCDate() + diff);
+  return date.toISOString().slice(0, 10);
+}
+
+function logSupabaseError(label: string, err: any) {
+  if (!err) return;
+  console.error(label, {
+    message: err.message,
+    details: err.details,
+    hint: err.hint,
+    code: err.code,
+    status: err.status,
+    raw: err,
+  });
+}
+
 export default function QuestsPage() {
   const supabase = useMemo(() => supabaseBrowser(), []);
   const [userId, setUserId] = useState<string | null>(null);
@@ -41,9 +62,12 @@ export default function QuestsPage() {
   const [busyQuestId, setBusyQuestId] = useState<string | null>(null);
 
   const today = useMemo(() => todayUTCDateString(), []);
+  const weekStart = useMemo(() => weekStartUTCDateString(), []);
+  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const loadUser = async () => {
-    const { data } = await supabase.auth.getUser();
+    const { data, error } = await supabase.auth.getUser();
+    if (error) logSupabaseError("auth.getUser failed", error);
     setUserId(data.user?.id ?? null);
   };
 
@@ -55,24 +79,62 @@ export default function QuestsPage() {
       .order("created_at", { ascending: true });
 
     if (error) {
-      console.error(error);
+      logSupabaseError("quests select failed", error);
       return;
     }
     setQuests((data ?? []) as Quest[]);
   };
 
-  const loadTodaysCompletions = async (uid: string) => {
+  /**
+   * We keep your existing schema: quest_completions has completed_day + unique(user_id, quest_id, completed_day)
+   *
+   * ✅ Daily quests are bucketed on: completed_day = today
+   * ✅ Weekly quests are bucketed on: completed_day = weekStart (Monday)
+   *
+   * This gives us "once per week" behavior WITHOUT schema migrations.
+   */
+  const loadBucketedCompletions = async (uid: string) => {
     const { data, error } = await supabase
       .from("quest_completions")
       .select("id,quest_id,completed_day")
       .eq("user_id", uid)
-      .eq("completed_day", today);
+      .in("completed_day", [today, weekStart]);
 
     if (error) {
-      console.error(error);
+      logSupabaseError("quest_completions select failed", error);
       return;
     }
     setCompletions((data ?? []) as CompletionRow[]);
+  };
+
+  const teardownRealtime = () => {
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
+  };
+
+  const setupRealtime = (uid: string) => {
+    teardownRealtime();
+
+    const ch = supabase.channel(`rt:quests:${uid}`);
+    channelRef.current = ch;
+
+    // Filter to only this user's completion rows
+    ch.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "quest_completions",
+        filter: `user_id=eq.${uid}`,
+      },
+      async () => {
+        await loadBucketedCompletions(uid);
+      }
+    );
+
+    ch.subscribe();
   };
 
   useEffect(() => {
@@ -80,102 +142,134 @@ export default function QuestsPage() {
       await loadUser();
       await loadQuests();
     })();
+
+    return () => teardownRealtime();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!userId) return;
-    loadTodaysCompletions(userId);
+    loadBucketedCompletions(userId);
+    setupRealtime(userId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  const completedMap = useMemo(() => {
-    const s = new Set(completions.map((c) => c.quest_id));
-    return s;
-  }, [completions]);
+  // ---- Completion maps: daily vs weekly bucket ----
+  const completionForDaily = useMemo(() => {
+    const map = new Map<string, CompletionRow>(); // quest_id -> row
+    for (const c of completions) {
+      if (c.completed_day === today) map.set(c.quest_id, c);
+    }
+    return map;
+  }, [completions, today]);
+
+  const completionForWeekly = useMemo(() => {
+    const map = new Map<string, CompletionRow>(); // quest_id -> row
+    for (const c of completions) {
+      if (c.completed_day === weekStart) map.set(c.quest_id, c);
+    }
+    return map;
+  }, [completions, weekStart]);
 
   const daily = useMemo(() => quests.filter((q) => q.kind === "daily"), [quests]);
   const weekly = useMemo(() => quests.filter((q) => q.kind === "weekly"), [quests]);
 
+  const isChecked = (q: Quest) => {
+    return q.kind === "daily" ? completionForDaily.has(q.id) : completionForWeekly.has(q.id);
+  };
+
   const stats = useMemo(() => {
-    const all = quests;
-    const total = all.length;
-    const done = all.filter((q) => completedMap.has(q.id)).length;
+    const total = quests.length;
+    const done = quests.filter((q) => isChecked(q)).length;
 
-    const pointsEarned = all.reduce(
-      (sum, q) => sum + (completedMap.has(q.id) ? q.reward_points : 0),
-      0
-    );
-
-    const savedCents = all.reduce(
-      (sum, q) => sum + (completedMap.has(q.id) ? q.est_saved_cents : 0),
-      0
-    );
+    const pointsEarned = quests.reduce((sum, q) => sum + (isChecked(q) ? q.reward_points : 0), 0);
+    const savedCents = quests.reduce((sum, q) => sum + (isChecked(q) ? q.est_saved_cents : 0), 0);
 
     const pct = total === 0 ? 0 : Math.round((done / total) * 100);
     return { total, done, pct, pointsEarned, savedCents };
-  }, [quests, completedMap]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quests, completionForDaily, completionForWeekly]);
 
   const toggleQuest = async (quest: Quest) => {
     if (!userId) return;
     setBusyQuestId(quest.id);
 
     try {
-      const isDone = completedMap.has(quest.id);
+      const done = isChecked(quest);
 
-      if (!isDone) {
-        // Insert completion (trigger sets completed_day)
+      // bucket day depends on kind
+      const bucketDay = quest.kind === "daily" ? today : weekStart;
+
+      if (!done) {
         const { error } = await supabase.from("quest_completions").insert({
           user_id: userId,
           quest_id: quest.id,
+          completed_day: bucketDay, // explicit bucket for daily/week
         });
 
-        if (error) {
-          // If unique violation (already completed today), ignore and refresh
-          console.error(error);
+        // Unique violation -> ignore (someone double-clicked)
+        if (error && error.code !== "23505") {
+          logSupabaseError("insert completion failed", error);
         }
       } else {
-        // Find today's completion row for this quest and delete it
-        const row = completions.find((c) => c.quest_id === quest.id);
-        if (row) {
-          const { error } = await supabase
-            .from("quest_completions")
-            .delete()
-            .eq("id", row.id);
+        // Delete the correct bucket row (daily or weekly)
+        const row =
+          quest.kind === "daily" ? completionForDaily.get(quest.id) : completionForWeekly.get(quest.id);
 
-          if (error) console.error(error);
+        if (row) {
+          const { error } = await supabase.from("quest_completions").delete().eq("id", row.id);
+          if (error) logSupabaseError("delete completion failed", error);
         }
       }
 
-      // Refresh completions after mutation
-      await loadTodaysCompletions(userId);
+      // No manual refresh needed; realtime will handle it.
+      // But keep a fallback refresh in case realtime isn't enabled.
+      await loadBucketedCompletions(userId);
     } finally {
       setBusyQuestId(null);
     }
   };
 
+  if (!userId) {
+    return (
+      <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-16">
+        <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-lg border border-emerald-100 p-8">
+          <h1 className="text-2xl font-bold text-emerald-700 mb-2">Quests</h1>
+          <p className="text-gray-600 mb-6">You’re not logged in.</p>
+          <Link
+            href="/login"
+            className="inline-block bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-6 py-3 rounded-xl shadow-md"
+          >
+            Go to Login →
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-10">
-      <div className="max-w-5xl mx-auto flex items-start justify-between gap-4 mb-8">
+    <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-4 sm:px-6 py-8 sm:py-10">
+      <div className="max-w-5xl mx-auto flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 sm:mb-8">
         <div>
           <h1 className="text-3xl font-bold text-emerald-700">🎯 Financial Quests</h1>
           <p className="text-gray-600">
-            Today (UTC): <span className="font-mono">{today}</span> — complete quests to earn points and build savings habits.
+            Daily bucket: <span className="font-mono">{today}</span> • Weekly bucket (Mon):{" "}
+            <span className="font-mono">{weekStart}</span>
           </p>
         </div>
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2 sm:justify-end">
           <Link
             href="/dashboard"
-            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-5 py-3 rounded-xl shadow-md border border-emerald-200"
+            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md border border-emerald-200"
           >
             ← Dashboard
           </Link>
           <Link
             href="/party"
-            className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-5 py-3 rounded-xl shadow-md"
+            className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md"
           >
-            👥 Lab Group
+            👥 Party
           </Link>
         </div>
       </div>
@@ -196,13 +290,13 @@ export default function QuestsPage() {
         <Card>
           <CardTitle>⭐ Points Earned</CardTitle>
           <div className="text-4xl font-bold text-emerald-700">{stats.pointsEarned}</div>
-          <div className="text-sm text-gray-600 mt-1">Live from Supabase completions.</div>
+          <div className="text-sm text-gray-600 mt-1">Saved to Supabase in real time.</div>
         </Card>
 
         <Card>
           <CardTitle>💰 Estimated Saved</CardTitle>
           <div className="text-4xl font-bold text-emerald-700">{formatMoneyCents(stats.savedCents)}</div>
-          <div className="text-sm text-gray-600 mt-1">Used for party leaderboard & weekly goal.</div>
+          <div className="text-sm text-gray-600 mt-1">Used for party progress + leaderboard.</div>
         </Card>
       </div>
 
@@ -215,7 +309,7 @@ export default function QuestsPage() {
               <QuestRow
                 key={q.id}
                 quest={q}
-                checked={completedMap.has(q.id)}
+                checked={isChecked(q)}
                 busy={busyQuestId === q.id}
                 onToggle={() => toggleQuest(q)}
               />
@@ -230,7 +324,7 @@ export default function QuestsPage() {
               <QuestRow
                 key={q.id}
                 quest={q}
-                checked={completedMap.has(q.id)}
+                checked={isChecked(q)}
                 busy={busyQuestId === q.id}
                 onToggle={() => toggleQuest(q)}
               />
@@ -238,7 +332,7 @@ export default function QuestsPage() {
           </div>
 
           <div className="mt-6 text-xs text-gray-500">
-            Next step: make weekly quests unique per week (instead of per day) by adding a separate “week_bucket” column.
+            Weekly quests are “once per week” by storing completions on Monday’s date (week bucket).
           </div>
         </Card>
       </div>
@@ -274,7 +368,7 @@ function QuestRow({
         checked ? "bg-emerald-50 border-emerald-200" : "bg-white hover:bg-emerald-50 border-emerald-100"
       }`}
     >
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-3 min-w-0">
         <div
           className={`mt-0.5 h-5 w-5 rounded border flex items-center justify-center ${
             checked ? "bg-emerald-600 border-emerald-600" : "bg-white border-gray-300"
@@ -284,8 +378,8 @@ function QuestRow({
           {checked ? <span className="text-white text-xs font-bold">✓</span> : null}
         </div>
 
-        <div>
-          <div className={`font-medium ${checked ? "text-emerald-900" : "text-gray-800"}`}>
+        <div className="min-w-0">
+          <div className={`font-medium truncate ${checked ? "text-emerald-900" : "text-gray-800"}`}>
             {quest.title}
           </div>
           <div className="text-xs text-gray-500 mt-1">
@@ -293,8 +387,7 @@ function QuestRow({
             {quest.est_saved_cents > 0 ? (
               <>
                 {" "}
-                • Est. saved:{" "}
-                <span className="font-semibold">{formatMoneyCents(quest.est_saved_cents)}</span>
+                • Est. saved: <span className="font-semibold">{formatMoneyCents(quest.est_saved_cents)}</span>
               </>
             ) : null}
           </div>
