@@ -3,37 +3,9 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
-
-type Party = {
-  id: string;
-  name: string;
-  join_code: string;
-  weekly_goal_cents: number;
-  created_by: string;
-};
-
-type MemberRow = {
-  user_id: string;
-  profiles: {
-    display_name: string | null;
-  } | null;
-};
-
-type QuestCounts = {
-  dailyCount: number;
-  weeklyCount: number;
-};
-
-type Quest = {
-  reward_points: number;
-  est_saved_cents: number;
-};
-
-type CompletionRow = {
-  user_id: string;
-  completed_day: string;
-  quests: Quest | null;
-};
+import { Card, CardTitle } from "@/components/Card";
+import PageLoading from "@/components/PageLoading";
+import "@/lib/types"
 
 function logSupabaseError(label: string, err: any) {
   if (!err) return;
@@ -81,6 +53,7 @@ const INPUT_CLASS =
 export default function PartyPage() {
   const supabase = useMemo(() => supabaseBrowser(), []);
   const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   const [myParties, setMyParties] = useState<Party[]>([]);
   const [activeParty, setActiveParty] = useState<Party | null>(null);
@@ -105,12 +78,25 @@ export default function PartyPage() {
   const [cheerCountsToday, setCheerCountsToday] = useState<Record<string, number>>({});
 
   const refreshAll = async () => {
+    setAuthLoading(true);
+
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     if (authErr) logSupabaseError("auth.getUser failed", authErr);
 
     const uid = auth.user?.id ?? null;
     setUserId(uid);
-    if (!uid) return;
+
+    if (!uid) {
+      setMyParties([]);
+      setActiveParty(null);
+      setMembers([]);
+      setLeaderboard([]);
+      setPartyCompletionCount(0);
+      setCheeredToday(new Set());
+      setCheerCountsToday({});
+      setAuthLoading(false);
+      return;
+    }
 
     const { data: pm, error: pmErr } = await supabase
       .from("party_members")
@@ -119,14 +105,22 @@ export default function PartyPage() {
 
     if (pmErr) {
       logSupabaseError("party_members select (my parties) failed", pmErr);
+      setAuthLoading(false);
       return;
     }
 
     const parties = (pm ?? []).map((r: any) => r.parties as Party).filter(Boolean);
     setMyParties(parties);
 
-    if (!activeParty && parties.length > 0) setActiveParty(parties[0]);
-    if (activeParty && !parties.some((p) => p.id === activeParty.id)) setActiveParty(parties[0] ?? null);
+    // Keep activeParty in sync
+    setActiveParty((prev) => {
+      if (!parties.length) return null;
+      if (!prev) return parties[0];
+      const stillInList = parties.some((p) => p.id === prev.id);
+      return stillInList ? prev : parties[0];
+    });
+
+    setAuthLoading(false);
   };
 
   const fetchQuestCounts = async () => {
@@ -237,6 +231,13 @@ export default function PartyPage() {
   useEffect(() => {
     refreshAll();
     fetchQuestCounts();
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+        refreshAll();
+      });
+  
+      return () => {
+        sub.subscription.unsubscribe();
+      };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -406,6 +407,7 @@ export default function PartyPage() {
     return { memberCount, possiblePerMember, totalPossible, completed: partyCompletionCount, pct };
   }, [members.length, questCounts.dailyCount, questCounts.weeklyCount, partyCompletionCount]);
 
+  const userInParty = !!activeParty;
   const copyInvite = async () => {
     if (!activeParty) return;
     try {
@@ -416,6 +418,29 @@ export default function PartyPage() {
       console.error("Clipboard copy failed", e);
     }
   };
+
+    // Don't render page until auth check finishes ----
+    if (authLoading) {
+        return <PageLoading />;
+      }
+    
+      // If auth is done and still no user -> show a stable "not logged in" screen (no flicker)
+      if (!userId) {
+        return (
+          <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-4 sm:px-6 py-10">
+            <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-lg border border-emerald-100 p-8">
+              <h1 className="text-2xl font-bold text-emerald-700 mb-2">Party</h1>
+              <p className="text-gray-600 mb-6">You’re not logged in.</p>
+              <Link
+                href="/login"
+                className="inline-block bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-6 py-3 rounded-xl shadow-md"
+              >
+                Go to Login →
+              </Link>
+            </div>
+          </main>
+        );
+      }
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-4 sm:px-6 py-8 sm:py-10">
@@ -438,99 +463,124 @@ export default function PartyPage() {
           >
             🎯 Quests
           </Link>
-          <button
-            onClick={() => setInviteOpen(true)}
-            disabled={!activeParty}
-            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md border border-emerald-200 disabled:opacity-50"
-          >
-            📩 Invite
-          </button>
+                    {userInParty ? (
+            <button
+              onClick={() => setInviteOpen(true)}
+              className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 sm:px-5 py-3 rounded-xl shadow-md border border-emerald-200"
+            >
+              📩 Invite
+            </button>
+          ) : null}
         </div>
       </div>
 
       <div className="max-w-5xl mx-auto grid lg:grid-cols-3 gap-6 mb-8">
-        <Card>
-          <CardTitle>🏁 Weekly Goal</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{progressMoney.pct}%</div>
-          <div className="text-sm text-gray-600 mt-1">
-            Saved: <span className="font-semibold">{formatMoneyCents(progressMoney.totalSaved)}</span> /{" "}
-            <span className="font-semibold">{formatMoneyCents(progressMoney.goal)}</span>
-          </div>
-          <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
-            <div className="h-2 bg-emerald-600" style={{ width: `${progressMoney.pct}%` }} />
-          </div>
-          <div className="mt-3 text-xs text-gray-500">
-            {activeParty ? (
-              <>
-                Active: <span className="font-semibold">{activeParty.name}</span>
-              </>
-            ) : (
-              "No active party selected."
-            )}
-          </div>
-        </Card>
+        {userInParty ? (
+          <>
+            <Card>
+              <CardTitle>🏁 Weekly Goal</CardTitle>
+              <div className="text-4xl font-bold text-emerald-700">{progressMoney.pct}%</div>
+              <div className="text-sm text-gray-600 mt-1">
+                Saved: <span className="font-semibold">{formatMoneyCents(progressMoney.totalSaved)}</span> /{" "}
+                <span className="font-semibold">{formatMoneyCents(progressMoney.goal)}</span>
+              </div>
+              <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
+                <div className="h-2 bg-emerald-600" style={{ width: `${progressMoney.pct}%` }} />
+              </div>
+              <div className="mt-3 text-xs text-gray-500">
+                Active: <span className="font-semibold">{activeParty?.name}</span>
+              </div>
+            </Card>
 
-        <Card>
-          <CardTitle>✅ Party Quest Completion</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{progressQuests.pct}%</div>
-          <div className="text-sm text-gray-600 mt-1">
-            Completed: <span className="font-semibold">{progressQuests.completed}</span> /{" "}
-            <span className="font-semibold">{progressQuests.totalPossible}</span>
-          </div>
-          <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
-            <div className="h-2 bg-emerald-600" style={{ width: `${progressQuests.pct}%` }} />
-          </div>
-          <div className="mt-3 text-xs text-gray-500">
-            {progressQuests.memberCount} members • {questCounts.dailyCount} daily • {questCounts.weeklyCount} weekly
-          </div>
-        </Card>
+            <Card>
+              <CardTitle>✅ Party Quest Completion</CardTitle>
+              <div className="text-4xl font-bold text-emerald-700">{progressQuests.pct}%</div>
+              <div className="text-sm text-gray-600 mt-1">
+                Completed: <span className="font-semibold">{progressQuests.completed}</span> /{" "}
+                <span className="font-semibold">{progressQuests.totalPossible}</span>
+              </div>
+              <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
+                <div className="h-2 bg-emerald-600" style={{ width: `${progressQuests.pct}%` }} />
+              </div>
+              <div className="mt-3 text-xs text-gray-500">
+                {progressQuests.memberCount} members • {questCounts.dailyCount} daily • {questCounts.weeklyCount} weekly
+              </div>
+            </Card>
 
-        <Card>
-          <CardTitle>💼 Your Parties</CardTitle>
-          {myParties.length === 0 ? (
-            <p className="text-sm text-gray-600">You’re not in any parties yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {myParties.map((p) => (
+            <Card>
+              <CardTitle>💼 Your Parties</CardTitle>
+              {myParties.length === 0 ? (
+                <p className="text-sm text-gray-600">You’re not in any parties yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {myParties.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => setActiveParty(p)}
+                      className={`w-full text-left rounded-xl border px-4 py-3 transition ${
+                        activeParty?.id === p.id
+                          ? "bg-emerald-50 border-emerald-200"
+                          : "bg-white hover:bg-emerald-50 border-emerald-100"
+                      }`}
+                    >
+                      <div className="font-semibold text-gray-800">{p.name}</div>
+                      <div className="text-xs text-gray-500">
+                        Code: <span className="font-mono">{p.join_code}</span> • Goal:{" "}
+                        {formatMoneyCents(p.weekly_goal_cents)}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 flex flex-wrap gap-2">
                 <button
-                  key={p.id}
-                  onClick={() => setActiveParty(p)}
-                  className={`w-full text-left rounded-xl border px-4 py-3 transition ${
-                    activeParty?.id === p.id
-                      ? "bg-emerald-50 border-emerald-200"
-                      : "bg-white hover:bg-emerald-50 border-emerald-100"
-                  }`}
+                  onClick={refreshAll}
+                  disabled={busy}
+                  className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
                 >
-                  <div className="font-semibold text-gray-800">{p.name}</div>
-                  <div className="text-xs text-gray-500">
-                    Code: <span className="font-mono">{p.join_code}</span> • Goal:{" "}
-                    {formatMoneyCents(p.weekly_goal_cents)}
-                  </div>
+                  Refresh
                 </button>
-              ))}
-            </div>
-          )}
-
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button
-              onClick={refreshAll}
-              disabled={busy}
-              className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
-            >
-              Refresh
-            </button>
-            <button
-              onClick={leaveParty}
-              disabled={busy || !activeParty}
-              className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
-            >
-              Leave Active
-            </button>
-          </div>
-        </Card>
+                <button
+                  onClick={leaveParty}
+                  disabled={busy || !activeParty}
+                  className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
+                >
+                  Leave Active
+                </button>
+              </div>
+            </Card>
+          </>
+        ) : null}
       </div>
 
-      <div className="max-w-5xl mx-auto grid lg:grid-cols-2 gap-6 mb-8">
+      {userInParty ? (
+        <div className="max-w-5xl mb-8 mx-auto">
+          <Card>
+            <CardTitle>🏅 Leaderboard (This Week)</CardTitle>
+            {leaderboard.length ? (
+              <div className="space-y-2">
+                {leaderboard.map((r) => (
+                  <div
+                    key={r.user_id}
+                    className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-semibold text-gray-800 truncate">{r.name}</div>
+                      <div className="text-xs text-gray-500">{r.points} pts</div>
+                    </div>
+                    <div className="font-semibold text-emerald-700">{formatMoneyCents(r.saved_cents)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-600">No completions yet this week. Go do some quests.</p>
+            )}
+          </Card>
+        </div>
+      ) : null}
+
+      <div className="max-w-5xl mx-auto grid lg:grid-cols-2 gap-6">
         <Card>
           <CardTitle>➕ Create / Join</CardTitle>
 
@@ -608,6 +658,7 @@ export default function PartyPage() {
           )}
         </Card>
 
+        {userInParty ? (
         <Card>
           <CardTitle>👥 Members</CardTitle>
           {activeParty ? (
@@ -646,35 +697,25 @@ export default function PartyPage() {
           ) : (
             <p className="text-sm text-gray-600">Select a party to see members.</p>
           )}
-        </Card>
-      </div>
-
-      <div className="max-w-5xl mx-auto">
-        <Card>
-          <CardTitle>🏅 Leaderboard (This Week)</CardTitle>
-          {activeParty ? (
-            leaderboard.length ? (
-              <div className="space-y-2">
-                {leaderboard.map((r) => (
-                  <div
-                    key={r.user_id}
-                    className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-800 truncate">{r.name}</div>
-                      <div className="text-xs text-gray-500">{r.points} pts</div>
-                    </div>
-                    <div className="font-semibold text-emerald-700">{formatMoneyCents(r.saved_cents)}</div>
-                  </div>
-                ))}
+        </Card>) : (
+            <Card className="hidden md:block">
+              <CardTitle>💼 Your Parties</CardTitle>
+              <p className="text-sm text-gray-600">None yet.</p>
+              <div className="my-4">
+                <button
+                  onClick={refreshAll}
+                  disabled={busy}
+                  className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
+                >
+                  Refresh
+                </button>
+                </div>
+                <div className="text-xs text-gray-500">
+                Tip: Use <span className="font-semibold">Create</span> to start a party, or{" "}
+                <span className="font-semibold">Join</span> with a code.
               </div>
-            ) : (
-              <p className="text-sm text-gray-600">No completions yet this week. Go do some quests.</p>
-            )
-          ) : (
-            <p className="text-sm text-gray-600">Select a party to view leaderboard.</p>
-          )}
-        </Card>
+            </Card>
+        ) }
       </div>
 
       {inviteOpen && activeParty ? (
@@ -723,13 +764,10 @@ export default function PartyPage() {
   );
 }
 
-function Card({ children }: { children: React.ReactNode }) {
-  return <div className="bg-white rounded-2xl shadow-lg border border-emerald-100 p-6">{children}</div>;
-}
 
-function CardTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="text-lg font-semibold text-emerald-700 mb-4">{children}</h2>;
-}
+
+  
+
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

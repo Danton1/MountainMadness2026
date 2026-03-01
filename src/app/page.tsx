@@ -43,7 +43,7 @@ export default function HomePage() {
           </h2>
           <p className="text-gray-600 text-sm">
             Students and busy professionals don’t fail budgeting because they
-            lack numbers — they fail because life gets chaotic. Deadlines,
+            lack numbers, they fail because life gets chaotic. Deadlines,
             birthdays, social events, bills, paydays. It’s unpredictable.
           </p>
         </div>
@@ -55,7 +55,7 @@ export default function HomePage() {
           <p className="text-gray-600 text-sm">
             CalendarQuest analyzes your week, calculates a Chaos Index, predicts
             spending risk, and turns your financial discipline into
-            gamified quests — backed by peer accountability.
+            gamified quests, backed by peer accountability.
           </p>
         </div>
 

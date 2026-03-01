@@ -2,126 +2,24 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import Image from "next/image";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+import {Avatar, MiniAvatar} from "@/components/Avatar"
+import {Card, CardTitle} from "@/components/Card";
+import Stat from "@/components/Stat";
+import BillsCalendar from "@/components/BillsCalendar";
+import PageLoading from "@/components/PageLoading";
+import type { DbEvent, Party, PartyMember, Profile, QuestCounts, CompletionRow } from "@/lib/types";
+import {
+  clamp,
+  computeWeekRisk,
+  formatMoney,
+  formatMoneyCents,
+  logSupabaseError,
+  next7DaysISO,
+  weekStartUTCDateString,
+} from "./utils";
 
-type EventType = "work" | "social" | "deadline" | "bill";
 
-type DbEvent = {
-  id: string;
-  user_id: string;
-  title: string;
-  type: EventType;
-  start_at: string; // timestamptz
-  end_at: string; // timestamptz
-};
-
-type Party = {
-  id: string;
-  name: string;
-  join_code: string;
-  weekly_goal_cents: number;
-  created_by: string;
-};
-
-type PartyMember = {
-  user_id: string;
-  profiles: { display_name: string | null; avatar_url: string | null } | null;
-};
-
-type Quest = {
-  reward_points: number;
-  est_saved_cents: number;
-};
-
-type CompletionRow = {
-  user_id: string;
-  completed_day: string; // YYYY-MM-DD
-  quests: Quest | null;
-};
-
-type Profile = {
-  id: string;
-  display_name: string;
-  avatar_url: string | null;
-  country: string;
-};
-
-type QuestCounts = { dailyCount: number; weeklyCount: number };
-
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function formatMoneyCents(cents: number) {
-  return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "CAD" });
-}
-
-function formatMoney(n: number) {
-  return n.toLocaleString(undefined, { style: "currency", currency: "CAD" });
-}
-
-function weekStartUTCDateString(d = new Date()) {
-  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = date.getUTCDay(); // 0 Sun ... 6 Sat
-  const diff = day === 0 ? -6 : 1 - day; // shift to Monday
-  date.setUTCDate(date.getUTCDate() + diff);
-  return date.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-
-function logSupabaseError(label: string, err: any) {
-  if (!err) return;
-  console.error(label, {
-    message: err.message,
-    details: err.details,
-    hint: err.hint,
-    code: err.code,
-    status: err.status,
-    raw: err,
-  });
-}
-
-function computeWeekRisk(events: DbEvent[]) {
-  const counts = { work: 0, social: 0, deadline: 0, bill: 0 };
-
-  for (const e of events) counts[e.type]++;
-
-  const score = counts.work * 5 + counts.deadline * 12 + counts.social * 10 + counts.bill * 8;
-
-  let label: "Green" | "Yellow" | "Red" = "Green";
-  if (score >= 60) label = "Red";
-  else if (score >= 35) label = "Yellow";
-
-  const dayRisk = new Map<string, number>();
-  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-  for (const e of events) {
-    const d = new Date(e.start_at);
-    const day = dayNames[d.getDay()];
-    const base = e.type === "social" ? 8 : e.type === "deadline" ? 6 : e.type === "work" ? 2 : 4;
-    const weekendBoost = d.getDay() === 5 || d.getDay() === 6 ? 1.4 : 1.0;
-    dayRisk.set(day, (dayRisk.get(day) ?? 0) + base * weekendBoost);
-  }
-
-  const topRiskDays = [...dayRisk.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 2)
-    .map(([day]) => day);
-
-  return {
-    score: Math.round(score),
-    label,
-    counts,
-    topRiskDays: topRiskDays.length ? topRiskDays : ["Fri", "Sat"],
-  };
-}
-
-function next7DaysISO() {
-  const now = new Date();
-  const end = new Date(now);
-  end.setDate(end.getDate() + 7);
-  return { start: now.toISOString(), end: end.toISOString() };
-}
 
 export default function DashboardPage() {
   const supabase = useMemo(() => supabaseBrowser(), []);
@@ -129,6 +27,7 @@ export default function DashboardPage() {
 
   const [userId, setUserId] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   const [myParties, setMyParties] = useState<Party[]>([]);
   const [activeParty, setActiveParty] = useState<Party | null>(null);
@@ -148,27 +47,35 @@ export default function DashboardPage() {
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
-  // -------------------- Loads --------------------
   const loadAuthAndProfile = async () => {
+    setAuthLoading(true);
+  
     const { data: auth, error: authErr } = await supabase.auth.getUser();
     if (authErr) logSupabaseError("auth.getUser failed", authErr);
-
+  
     const uid = auth.user?.id ?? null;
     setUserId(uid);
-    if (!uid) return;
-
+  
+    if (!uid) {
+      setProfile(null);
+      setAuthLoading(false);
+      return;
+    }
+  
     const { data: p, error: pErr } = await supabase
       .from("profiles")
       .select("id, display_name, avatar_url, country")
       .eq("id", uid)
       .single();
-
+  
     if (pErr) {
       logSupabaseError("profiles select failed", pErr);
       setProfile(null);
     } else {
       setProfile(p as Profile);
     }
+  
+    setAuthLoading(false);
   };
 
   const loadMyParties = async (uid: string) => {
@@ -254,12 +161,18 @@ export default function DashboardPage() {
     setPartyAgg({ points, saved_cents, completionCount: rows.length });
   };
 
+  const billEvents = useMemo(() => {
+    return events
+      .filter((e) => e.type === "bill")
+      .map((e) => ({ id: e.id, title: e.title, start_at: e.start_at }));
+  }, [events]);
+
   const loadEventsNext7Days = async (uid: string) => {
     const { start, end } = next7DaysISO();
 
     const { data, error } = await supabase
       .from("events")
-      .select("id, user_id, title, type, start_at, end_at")
+      .select("id, user_id, title, type, start_at, end_at, amount_cents, bill_category, recur_freq, recur_interval, recur_until")
       .eq("user_id", uid)
       .gte("start_at", start)
       .lte("start_at", end)
@@ -273,7 +186,6 @@ export default function DashboardPage() {
     setEvents((data ?? []) as DbEvent[]);
   };
 
-  // -------------------- Realtime --------------------
   const teardownRealtime = () => {
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
@@ -308,11 +220,20 @@ export default function DashboardPage() {
   useEffect(() => {
     loadAuthAndProfile();
     loadQuestCounts();
-    return () => teardownRealtime();
+  
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      loadAuthAndProfile();
+    });
+  
+    return () => {
+      teardownRealtime();
+      sub.subscription.unsubscribe();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    
     if (!userId) return;
     loadMyParties(userId);
     loadEventsNext7Days(userId);
@@ -389,9 +310,13 @@ export default function DashboardPage() {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [members, userId]);
 
+  if (authLoading) {
+    return <PageLoading />;
+  }
+
   if (!userId) {
     return (
-      <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-16">
+      <main className="min-h-screen bg-linear-to-br from-emerald-50 to-white px-6 py-16">
         <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-lg border border-emerald-100 p-8">
           <h1 className="text-2xl font-bold text-emerald-700 mb-2">Dashboard</h1>
           <p className="text-gray-600 mb-6">You’re not logged in.</p>
@@ -407,14 +332,14 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-4 sm:px-6 py-8 sm:py-10">
+    <main className="min-h-screen bg-linear-to-br from-emerald-50 to-white px-4 sm:px-6 py-8 sm:py-10">
       <div className="max-w-5xl mx-auto flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 sm:mb-8">
         <div className="flex items-center gap-4">
           <Avatar name={profile?.display_name ?? "You"} avatarUrl={profile?.avatar_url ?? null} />
           <div>
             <h1 className="text-3xl font-bold text-emerald-700">🧪 Weekly Report</h1>
             <p className="text-gray-600">
-              Hello <span className="font-semibold">{profile?.display_name ?? "You"}</span> — here’s your
+              Hello <span className="font-semibold">{profile?.display_name ?? "You"}</span>, here’s your
               calendar-driven financial forecast.
             </p>
           </div>
@@ -475,7 +400,7 @@ export default function DashboardPage() {
                     <div className="font-medium text-gray-800">{b.name}</div>
                     <div className="text-gray-500">Due {b.due}</div>
                   </div>
-                  <div className="font-semibold text-gray-800">—</div>
+                  <div className="font-semibold text-gray-800">,</div>
                 </li>
               ))}
             </ul>
@@ -512,7 +437,7 @@ export default function DashboardPage() {
 
           <div className="mt-6 text-sm text-gray-600">
             <span className="font-semibold">Actionable insight:</span>{" "}
-            Your spending risk rises when social events and deadlines stack up — especially near weekends.
+            Your spending risk rises when social events and deadlines stack up, especially near weekends.
           </div>
         </Card>
 
@@ -593,66 +518,15 @@ export default function DashboardPage() {
           )}
         </Card>
       </div>
+      <div className="max-w-5xl mx-auto grid mt-8 gap-6">
+        <BillsCalendar bills={billEvents} />
+      </div>
+
     </main>
   );
 }
 
-/* UI helpers */
-function Card({ children }: { children: React.ReactNode }) {
-  return <div className="bg-white rounded-2xl shadow-lg border border-emerald-100 p-6">{children}</div>;
-}
 
-function CardTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="text-lg font-semibold text-emerald-700 mb-4">{children}</h2>;
-}
 
-function Stat({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4">
-      <div className="text-2xl font-bold text-emerald-700">{value}</div>
-      <div className="text-xs text-gray-600 mt-1">{label}</div>
-    </div>
-  );
-}
 
-function Avatar({ name, avatarUrl }: { name: string; avatarUrl: string | null }) {
-  if (avatarUrl) {
-    // eslint-disable-next-line @next/next/no-img-element
-    return (
-      <Image
-        src={avatarUrl}
-        alt={name}
-        width={56}
-        height={56}
-        className="h-14 w-14 rounded-2xl object-cover border border-emerald-100 shadow-sm"
-      />
-    );
-  }
-  const initial = (name?.[0] ?? "U").toUpperCase();
-  return (
-    <div className="h-14 w-14 rounded-2xl bg-emerald-600 text-white font-bold flex items-center justify-center shadow-sm">
-      {initial}
-    </div>
-  );
-}
 
-function MiniAvatar({ name, avatarUrl }: { name: string; avatarUrl: string | null }) {
-  if (avatarUrl) {
-    // eslint-disable-next-line @next/next/no-img-element
-    return (
-      <Image
-        src={avatarUrl}
-        alt={name}
-        width={32}
-        height={32}
-        className="h-8 w-8 rounded-xl object-cover border border-emerald-100"
-      />
-    );
-  }
-  const initial = (name?.[0] ?? "U").toUpperCase();
-  return (
-    <div className="h-8 w-8 rounded-xl bg-emerald-600 text-white font-bold flex items-center justify-center text-xs">
-      {initial}
-    </div>
-  );
-}

@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase/browser";
+import { Card, CardTitle } from "@/components/Card";
+import PageLoading from "@/components/PageLoading";
 
 type Quest = {
   id: string;
@@ -23,7 +25,10 @@ function clamp(n: number, min: number, max: number) {
 }
 
 function formatMoneyCents(cents: number) {
-  return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "CAD" });
+  return (cents / 100).toLocaleString(undefined, {
+    style: "currency",
+    currency: "CAD",
+  });
 }
 
 function todayUTCDateString(d = new Date()) {
@@ -34,7 +39,9 @@ function todayUTCDateString(d = new Date()) {
 
 function weekStartUTCDateString(d = new Date()) {
   // Monday start, UTC
-  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const date = new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+  );
   const day = date.getUTCDay(); // 0 Sun ... 6 Sat
   const diff = day === 0 ? -6 : 1 - day; // shift to Monday
   date.setUTCDate(date.getUTCDate() + diff);
@@ -56,6 +63,7 @@ function logSupabaseError(label: string, err: any) {
 export default function QuestsPage() {
   const supabase = useMemo(() => supabaseBrowser(), []);
   const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   const [quests, setQuests] = useState<Quest[]>([]);
   const [completions, setCompletions] = useState<CompletionRow[]>([]);
@@ -66,9 +74,21 @@ export default function QuestsPage() {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const loadUser = async () => {
+    setAuthLoading(true);
+
     const { data, error } = await supabase.auth.getUser();
-    if (error) logSupabaseError("auth.getUser failed", error);
-    setUserId(data.user?.id ?? null);
+    if (error) console.error("auth.getUser failed", error);
+
+    const uid = data.user?.id ?? null;
+    setUserId(uid);
+
+    // If logged out, clear user-specific data so UI is consistent
+    if (!uid) {
+      setCompletions([]);
+      setBusyQuestId(null);
+    }
+
+    setAuthLoading(false);
   };
 
   const loadQuests = async () => {
@@ -85,14 +105,6 @@ export default function QuestsPage() {
     setQuests((data ?? []) as Quest[]);
   };
 
-  /**
-   * We keep your existing schema: quest_completions has completed_day + unique(user_id, quest_id, completed_day)
-   *
-   * ✅ Daily quests are bucketed on: completed_day = today
-   * ✅ Weekly quests are bucketed on: completed_day = weekStart (Monday)
-   *
-   * This gives us "once per week" behavior WITHOUT schema migrations.
-   */
   const loadBucketedCompletions = async (uid: string) => {
     const { data, error } = await supabase
       .from("quest_completions")
@@ -143,7 +155,13 @@ export default function QuestsPage() {
       await loadQuests();
     })();
 
-    return () => teardownRealtime();
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      loadUser(); // re-check user + stop flicker on transitions
+    });
+
+    return () => {
+      sub.subscription.unsubscribe();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -171,19 +189,33 @@ export default function QuestsPage() {
     return map;
   }, [completions, weekStart]);
 
-  const daily = useMemo(() => quests.filter((q) => q.kind === "daily"), [quests]);
-  const weekly = useMemo(() => quests.filter((q) => q.kind === "weekly"), [quests]);
+  const daily = useMemo(
+    () => quests.filter((q) => q.kind === "daily"),
+    [quests]
+  );
+  const weekly = useMemo(
+    () => quests.filter((q) => q.kind === "weekly"),
+    [quests]
+  );
 
   const isChecked = (q: Quest) => {
-    return q.kind === "daily" ? completionForDaily.has(q.id) : completionForWeekly.has(q.id);
+    return q.kind === "daily"
+      ? completionForDaily.has(q.id)
+      : completionForWeekly.has(q.id);
   };
 
   const stats = useMemo(() => {
     const total = quests.length;
     const done = quests.filter((q) => isChecked(q)).length;
 
-    const pointsEarned = quests.reduce((sum, q) => sum + (isChecked(q) ? q.reward_points : 0), 0);
-    const savedCents = quests.reduce((sum, q) => sum + (isChecked(q) ? q.est_saved_cents : 0), 0);
+    const pointsEarned = quests.reduce(
+      (sum, q) => sum + (isChecked(q) ? q.reward_points : 0),
+      0
+    );
+    const savedCents = quests.reduce(
+      (sum, q) => sum + (isChecked(q) ? q.est_saved_cents : 0),
+      0
+    );
 
     const pct = total === 0 ? 0 : Math.round((done / total) * 100);
     return { total, done, pct, pointsEarned, savedCents };
@@ -214,47 +246,59 @@ export default function QuestsPage() {
       } else {
         // Delete the correct bucket row (daily or weekly)
         const row =
-          quest.kind === "daily" ? completionForDaily.get(quest.id) : completionForWeekly.get(quest.id);
+          quest.kind === "daily"
+            ? completionForDaily.get(quest.id)
+            : completionForWeekly.get(quest.id);
 
         if (row) {
-          const { error } = await supabase.from("quest_completions").delete().eq("id", row.id);
+          const { error } = await supabase
+            .from("quest_completions")
+            .delete()
+            .eq("id", row.id);
           if (error) logSupabaseError("delete completion failed", error);
         }
       }
 
-      // No manual refresh needed; realtime will handle it.
-      // But keep a fallback refresh in case realtime isn't enabled.
+      // Fallback refresh in case realtime isn't enabled.
       await loadBucketedCompletions(userId);
     } finally {
       setBusyQuestId(null);
     }
   };
 
-  if (!userId) {
-    return (
-      <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-16">
-        <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-lg border border-emerald-100 p-8">
-          <h1 className="text-2xl font-bold text-emerald-700 mb-2">Quests</h1>
-          <p className="text-gray-600 mb-6">You’re not logged in.</p>
-          <Link
-            href="/login"
-            className="inline-block bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-6 py-3 rounded-xl shadow-md"
-          >
-            Go to Login →
-          </Link>
-        </div>
-      </main>
-    );
-  }
+  // Don't render page until auth check finishes (prevents flicker)
+if (authLoading) {
+  return <PageLoading />;
+}
+
+// If auth is done and still no user -> stable "not logged in" screen
+if (!userId) {
+  return (
+    <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-16">
+      <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-lg border border-emerald-100 p-8">
+        <h1 className="text-2xl font-bold text-emerald-700 mb-2">Quests</h1>
+        <p className="text-gray-600 mb-6">You’re not logged in.</p>
+        <Link
+          href="/login"
+          className="inline-block bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-6 py-3 rounded-xl shadow-md"
+        >
+          Go to Login →
+        </Link>
+      </div>
+    </main>
+  );
+}
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-4 sm:px-6 py-8 sm:py-10">
       <div className="max-w-5xl mx-auto flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 sm:mb-8">
         <div>
-          <h1 className="text-3xl font-bold text-emerald-700">🎯 Financial Quests</h1>
+          <h1 className="text-3xl font-bold text-emerald-700">
+            🎯 Financial Quests
+          </h1>
           <p className="text-gray-600">
-            Daily bucket: <span className="font-mono">{today}</span> • Weekly bucket (Mon):{" "}
-            <span className="font-mono">{weekStart}</span>
+            Daily bucket: <span className="font-mono">{today}</span> • Weekly
+            bucket (Mon): <span className="font-mono">{weekStart}</span>
           </p>
         </div>
 
@@ -278,25 +322,38 @@ export default function QuestsPage() {
       <div className="max-w-5xl mx-auto grid md:grid-cols-3 gap-6 mb-8">
         <Card>
           <CardTitle>✅ Progress</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{stats.pct}%</div>
+          <div className="text-4xl font-bold text-emerald-700">
+            {stats.pct}%
+          </div>
           <div className="text-sm text-gray-600 mt-1">
             {stats.done} / {stats.total} quests completed
           </div>
           <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
-            <div className="h-2 bg-emerald-600" style={{ width: `${clamp(stats.pct, 0, 100)}%` }} />
+            <div
+              className="h-2 bg-emerald-600"
+              style={{ width: `${clamp(stats.pct, 0, 100)}%` }}
+            />
           </div>
         </Card>
 
         <Card>
           <CardTitle>⭐ Points Earned</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{stats.pointsEarned}</div>
-          <div className="text-sm text-gray-600 mt-1">Saved to Supabase in real time.</div>
+          <div className="text-4xl font-bold text-emerald-700">
+            {stats.pointsEarned}
+          </div>
+          <div className="text-sm text-gray-600 mt-1">
+            Saved to Supabase in real time.
+          </div>
         </Card>
 
         <Card>
           <CardTitle>💰 Estimated Saved</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{formatMoneyCents(stats.savedCents)}</div>
-          <div className="text-sm text-gray-600 mt-1">Used for party progress + leaderboard.</div>
+          <div className="text-4xl font-bold text-emerald-700">
+            {formatMoneyCents(stats.savedCents)}
+          </div>
+          <div className="text-sm text-gray-600 mt-1">
+            Used for party progress + leaderboard.
+          </div>
         </Card>
       </div>
 
@@ -332,21 +389,13 @@ export default function QuestsPage() {
           </div>
 
           <div className="mt-6 text-xs text-gray-500">
-            Weekly quests are “once per week” by storing completions on Monday’s date (week bucket).
+            Weekly quests are “once per week” by storing completions on Monday’s
+            date (week bucket).
           </div>
         </Card>
       </div>
     </main>
   );
-}
-
-/* UI */
-function Card({ children }: { children: React.ReactNode }) {
-  return <div className="bg-white rounded-2xl shadow-lg border border-emerald-100 p-6">{children}</div>;
-}
-
-function CardTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="text-lg font-semibold text-emerald-700 mb-4">{children}</h2>;
 }
 
 function QuestRow({
@@ -365,29 +414,43 @@ function QuestRow({
       onClick={onToggle}
       disabled={busy}
       className={`w-full text-left flex items-center justify-between gap-4 rounded-xl border px-4 py-3 transition disabled:opacity-60 ${
-        checked ? "bg-emerald-50 border-emerald-200" : "bg-white hover:bg-emerald-50 border-emerald-100"
+        checked
+          ? "bg-emerald-50 border-emerald-200"
+          : "bg-white hover:bg-emerald-50 border-emerald-100"
       }`}
     >
       <div className="flex items-start gap-3 min-w-0">
         <div
           className={`mt-0.5 h-5 w-5 rounded border flex items-center justify-center ${
-            checked ? "bg-emerald-600 border-emerald-600" : "bg-white border-gray-300"
+            checked
+              ? "bg-emerald-600 border-emerald-600"
+              : "bg-white border-gray-300"
           }`}
           aria-hidden="true"
         >
-          {checked ? <span className="text-white text-xs font-bold">✓</span> : null}
+          {checked ? (
+            <span className="text-white text-xs font-bold">✓</span>
+          ) : null}
         </div>
 
         <div className="min-w-0">
-          <div className={`font-medium truncate ${checked ? "text-emerald-900" : "text-gray-800"}`}>
+          <div
+            className={`font-medium truncate ${
+              checked ? "text-emerald-900" : "text-gray-800"
+            }`}
+          >
             {quest.title}
           </div>
           <div className="text-xs text-gray-500 mt-1">
-            Reward: <span className="font-semibold">{quest.reward_points} pts</span>
+            Reward:{" "}
+            <span className="font-semibold">{quest.reward_points} pts</span>
             {quest.est_saved_cents > 0 ? (
               <>
                 {" "}
-                • Est. saved: <span className="font-semibold">{formatMoneyCents(quest.est_saved_cents)}</span>
+                • Est. saved:{" "}
+                <span className="font-semibold">
+                  {formatMoneyCents(quest.est_saved_cents)}
+                </span>
               </>
             ) : null}
           </div>
@@ -396,7 +459,9 @@ function QuestRow({
 
       <span
         className={`text-xs font-semibold px-3 py-1 rounded-full ${
-          quest.kind === "weekly" ? "bg-emerald-100 text-emerald-800" : "bg-gray-100 text-gray-700"
+          quest.kind === "weekly"
+            ? "bg-emerald-100 text-emerald-800"
+            : "bg-gray-100 text-gray-700"
         }`}
       >
         {quest.kind === "weekly" ? "Weekly" : "Daily"}
