@@ -2,231 +2,327 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-
-type EventType = "work" | "social" | "deadline" | "bill";
-
-type CalendarEvent = {
-  title: string;
-  start: string;
-  end: string;
-  type: EventType;
-};
-
-type Bill = {
-  name: string;
-  amount: number;
-  due: string;
-};
-
-type DemoPayload = {
-  user: { name: string; weeklyIncome: number };
-  bills: Bill[];
-  events: CalendarEvent[];
-  party: {
-    name: string;
-    joinCode: string;
-    weeklyGoal: number;
-    members: { name: string; points: number }[];
-  };
-};
+import { supabaseBrowser } from "@/lib/supabase/browser";
 
 type Party = {
+  id: string;
   name: string;
-  joinCode: string;
-  weeklyGoal: number;
-  members: { name: string; points: number }[];
+  join_code: string;
+  weekly_goal_cents: number;
+  created_by: string;
 };
 
-type QuestCompletionMap = Record<string, boolean>;
-
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function formatMoney(n: number) {
-  return n.toLocaleString(undefined, { style: "currency", currency: "CAD" });
-}
-
-function partyStorageKey() {
-  return "calendarquest_party_v1";
-}
-
-function completionsStorageKey() {
-  return "calendarquest_completions_v1";
-}
-
-/**
- * Rough mapping of quest IDs -> estimated dollars saved.
- * (Keeps it demo-friendly and consistent with Quests page.)
- */
-const QUEST_EST_SAVED: Record<string, number> = {
-  coffee: 4,
-  move5: 5,
-  lunch: 10,
-  nodelivery: 20,
-  wk_buffer: 40, // will be overridden by label logic later; fine for demo
-  wk_party: 30,
+type MemberRow = {
+  user_id: string;
 };
 
-function estimateSavedFromCompletions(completed: QuestCompletionMap) {
-  return Object.entries(completed).reduce((sum, [id, done]) => {
-    if (!done) return sum;
-    return sum + (QUEST_EST_SAVED[id] ?? 0);
-  }, 0);
+type Quest = {
+  reward_points: number;
+  est_saved_cents: number;
+};
+
+type CompletionRow = {
+  user_id: string;
+  completed_day: string; // YYYY-MM-DD
+  quests: Quest | null;
+};
+
+function logSupabaseError(label: string, err: any) {
+  if (!err) {
+    console.error(label, err);
+    return;
+  }
+  console.error(label, {
+    message: err.message,
+    details: err.details,
+    hint: err.hint,
+    code: err.code,
+    status: err.status,
+    name: err.name,
+    stack: err.stack,
+    raw: err,
+  });
 }
+
+function formatMoneyCents(cents: number) {
+  return (cents / 100).toLocaleString(undefined, { style: "currency", currency: "CAD" });
+}
+
+function weekStartUTCDateString(d = new Date()) {
+  // Monday start
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const day = date.getUTCDay(); // 0 Sun ... 6 Sat
+  const diff = day === 0 ? -6 : 1 - day; // shift to Monday
+  date.setUTCDate(date.getUTCDate() + diff);
+  return date.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function randomJoinCode(len = 6) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+const INPUT_CLASS =
+  "w-full rounded-xl border border-emerald-200 px-4 py-2 text-black placeholder:text-gray-400 outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-400";
 
 export default function PartyPage() {
-  const [data, setData] = useState<DemoPayload | null>(null);
+  const supabase = useMemo(() => supabaseBrowser(), []);
+  const [userId, setUserId] = useState<string | null>(null);
 
-  // The party you are "actually using" (stored locally)
-  const [party, setParty] = useState<Party | null>(null);
+  const [myParties, setMyParties] = useState<Party[]>([]);
+  const [activeParty, setActiveParty] = useState<Party | null>(null);
+  const [members, setMembers] = useState<MemberRow[]>([]);
+  const [leaderboard, setLeaderboard] = useState<
+    { user_id: string; name: string; points: number; saved_cents: number }[]
+  >([]);
 
-  // Form
-  const [mode, setMode] = useState<"join" | "create">("join");
+  // Create / Join form (Create inputs start empty so placeholders work)
+  const [mode, setMode] = useState<"create" | "join">("create");
   const [nameInput, setNameInput] = useState("");
-  const [codeInput, setCodeInput] = useState("");
-  const [goalInput, setGoalInput] = useState("60");
+  const [goalInput, setGoalInput] = useState("");
+  const [joinCodeInput, setJoinCodeInput] = useState(""); // only for JOIN
+  const [busy, setBusy] = useState(false);
 
-  // Quest completions (for progress)
-  const [completed, setCompleted] = useState<QuestCompletionMap>({});
+  // Invite modal
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const refreshAll = async () => {
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    if (authErr) logSupabaseError("auth.getUser failed", authErr);
+
+    const uid = auth.user?.id ?? null;
+    setUserId(uid);
+    if (!uid) return;
+
+    // Parties via membership
+    const { data: pm, error: pmErr } = await supabase
+      .from("party_members")
+      .select("party_id, parties:parties(id,name,join_code,weekly_goal_cents,created_by)")
+      .eq("user_id", uid);
+
+    if (pmErr) {
+      logSupabaseError("party_members select (for my parties) failed", pmErr);
+      return;
+    }
+
+    const parties = (pm ?? [])
+      .map((r: any) => r.parties as Party)
+      .filter(Boolean);
+
+    setMyParties(parties);
+
+    if (!activeParty && parties.length > 0) {
+      setActiveParty(parties[0]);
+    }
+  };
+
+  const refreshMembersAndLeaderboard = async (party: Party, uid: string | null) => {
+    // Members (NO profiles join here — keeps RLS simpler)
+    const { data: mem, error: memErr } = await supabase
+      .from("party_members")
+      .select("user_id, profiles:profiles(display_name)")
+      .eq("party_id", party.id);
+
+    if (memErr) {
+      logSupabaseError("party_members select (members list) failed", memErr);
+      return;
+    }
+
+    const memberRows = (mem ?? []) as unknown as MemberRow[];
+    setMembers(memberRows);
+
+    const ids = memberRows.map((m) => m.user_id);
+    if (ids.length === 0) {
+      setLeaderboard([]);
+      return;
+    }
+
+    // Completions this week for those members
+    const weekStart = weekStartUTCDateString();
+
+    const { data: comps, error: compErr } = await supabase
+      .from("quest_completions")
+      .select("user_id, completed_day, quests:quests(reward_points,est_saved_cents)")
+      .in("user_id", ids)
+      .gte("completed_day", weekStart);
+
+    if (compErr) {
+      logSupabaseError("quest_completions select (leaderboard) failed", compErr);
+      return;
+    }
+
+    const rows = (comps ?? []) as unknown as CompletionRow[];
+
+    // Aggregate
+    const agg = new Map<string, { points: number; saved_cents: number }>();
+    for (const r of rows) {
+      const cur = agg.get(r.user_id) ?? { points: 0, saved_cents: 0 };
+      cur.points += r.quests?.reward_points ?? 0;
+      cur.saved_cents += r.quests?.est_saved_cents ?? 0;
+      agg.set(r.user_id, cur);
+    }
+
+    const board = ids.map((id) => ({
+      user_id: id,
+      name: id === uid ? "You" : id.slice(0, 8),
+      points: agg.get(id)?.points ?? 0,
+      saved_cents: agg.get(id)?.saved_cents ?? 0,
+    }));
+
+    board.sort((a, b) => b.saved_cents - a.saved_cents || b.points - a.points);
+    setLeaderboard(board);
+  };
 
   useEffect(() => {
-    // Load demo payload (fallback)
-    const raw = localStorage.getItem("calendarquest_demo");
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as DemoPayload;
-        setData(parsed);
-      } catch (e) {
-        console.error("Failed to parse demo payload:", e);
-      }
-    }
-
-    // Load party state (if exists)
-    const pRaw = localStorage.getItem(partyStorageKey());
-    if (pRaw) {
-      try {
-        setParty(JSON.parse(pRaw));
-      } catch {
-        // ignore
-      }
-    }
-
-    // Load quest completions
-    const cRaw = localStorage.getItem(completionsStorageKey());
-    if (cRaw) {
-      try {
-        setCompleted(JSON.parse(cRaw));
-      } catch {
-        // ignore
-      }
-    }
+    refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    if (party) localStorage.setItem(partyStorageKey(), JSON.stringify(party));
-  }, [party]);
+    if (activeParty) refreshMembersAndLeaderboard(activeParty, userId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeParty, userId]);
 
-  const activeParty = useMemo<Party | null>(() => {
-    // If user has created/joined a party, use that.
-    // Otherwise, show demo party.
-    if (party) return party;
-    if (data?.party) return data.party;
-    return null;
-  }, [party, data]);
+  const createParty = async () => {
+    if (!userId) return;
+    setBusy(true);
 
-  const youName = useMemo(() => data?.user.name ?? "You", [data]);
+    try {
+      const weekly_goal_cents = Math.max(1000, Math.round(((Number(goalInput) || 60) * 100)));
+      const partyName = nameInput.trim() || "My Lab Group";
 
-  const estSaved = useMemo(() => estimateSavedFromCompletions(completed), [completed]);
+      // Always auto-generate and guarantee uniqueness by retrying on conflict
+      let party: Party | null = null;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const join_code = randomJoinCode().toUpperCase();
 
-  const goal = activeParty?.weeklyGoal ?? 60;
-  const progressPct = clamp((estSaved / goal) * 100, 0, 100);
+        const { data, error } = await supabase
+          .from("parties")
+          .insert({
+            name: partyName,
+            join_code,
+            weekly_goal_cents,
+            created_by: userId,
+          })
+          .select()
+          .single();
 
-  const joinDemoParty = () => {
-    if (!data) return;
-    setParty({
-      name: data.party.name,
-      joinCode: data.party.joinCode,
-      weeklyGoal: data.party.weeklyGoal,
-      members: data.party.members,
-    });
+        if (!error) {
+          party = data as Party;
+          break;
+        }
+
+        // Unique violation -> try again
+        if (error.code === "23505") continue;
+
+        // Other error -> bail
+        throw error;
+      }
+
+      if (!party) {
+        console.error("Failed to generate unique join code after retries.");
+        return;
+      }
+
+      const { error: mErr } = await supabase.from("party_members").insert({
+        party_id: party.id,
+        user_id: userId,
+        role: "owner",
+      });
+
+      if (mErr) throw mErr;
+
+      await refreshAll();
+      setActiveParty(party);
+
+      // reset form
+      setNameInput("");
+      setGoalInput("");
+      setMode("join");
+    } catch (e) {
+      logSupabaseError("createParty failed", e);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleCreate = () => {
-    const partyName = nameInput.trim() || "My Lab Group";
-    const joinCode = (codeInput.trim() || "JEKYLL").toUpperCase().slice(0, 10);
-    const weeklyGoal = Math.max(10, Number(goalInput) || 60);
+  const joinParty = async () => {
+    if (!userId) return;
+    const code = joinCodeInput.trim().toUpperCase();
+    if (!code) return;
 
-    const newParty: Party = {
-      name: partyName,
-      joinCode,
-      weeklyGoal,
-      members: [
-        { name: youName, points: 0 },
-        { name: "Alex", points: 0 },
-        { name: "Sam", points: 0 },
-      ],
-    };
+    setBusy(true);
+    try {
+      const { data: party, error: pErr } = await supabase
+        .from("parties")
+        .select("*")
+        .eq("join_code", code)
+        .single();
 
-    setParty(newParty);
+      if (pErr) throw pErr;
+
+      const { error: mErr } = await supabase.from("party_members").insert({
+        party_id: party.id,
+        user_id: userId,
+        role: "member",
+      });
+
+      // Already joined -> ignore
+      if (mErr && mErr.code !== "23505") throw mErr;
+
+      await refreshAll();
+      setActiveParty(party as Party);
+      setJoinCodeInput("");
+    } catch (e) {
+      logSupabaseError("joinParty failed", e);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleJoin = () => {
-    const joinCode = (codeInput.trim() || "").toUpperCase().slice(0, 10);
-    if (!joinCode) return;
+  const leaveParty = async () => {
+    if (!userId || !activeParty) return;
+    setBusy(true);
+    try {
+      const { error } = await supabase
+        .from("party_members")
+        .delete()
+        .eq("party_id", activeParty.id)
+        .eq("user_id", userId);
 
-    // Hackathon-friendly: joining just creates a party shell locally.
-    // In Supabase version, you'd query by code and join a real party.
-    const joined: Party = {
-      name: "Joined Lab Group",
-      joinCode,
-      weeklyGoal: 60,
-      members: [
-        { name: youName, points: 0 },
-        { name: "Member A", points: 0 },
-        { name: "Member B", points: 0 },
-      ],
-    };
+      if (error) throw error;
 
-    setParty(joined);
+      setInviteOpen(false);
+      setCopied(false);
+      setActiveParty(null);
+      await refreshAll();
+    } catch (e) {
+      logSupabaseError("leaveParty failed", e);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const resetParty = () => {
-    setParty(null);
-    localStorage.removeItem(partyStorageKey());
-  };
+  const progress = useMemo(() => {
+    const goal = activeParty?.weekly_goal_cents ?? 6000;
+    const totalSaved = leaderboard.reduce((s, r) => s + r.saved_cents, 0);
+    const pct = goal === 0 ? 0 : Math.max(0, Math.min(100, Math.round((totalSaved / goal) * 100)));
+    return { goal, totalSaved, pct };
+  }, [activeParty, leaderboard]);
 
-  const cheer = (memberName: string) => {
+  const copyInvite = async () => {
     if (!activeParty) return;
-    const next = {
-      ...activeParty,
-      members: activeParty.members.map((m) =>
-        m.name === memberName ? { ...m, points: m.points + 1 } : m
-      ),
-    };
-    setParty(next);
+    try {
+      await navigator.clipboard.writeText(activeParty.join_code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch (e) {
+      console.error("Clipboard copy failed", e);
+    }
   };
-
-  if (!data) {
-    return (
-      <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-16">
-        <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-lg border border-emerald-100 p-8">
-          <h1 className="text-2xl font-bold text-emerald-700 mb-2">
-            Lab Group
-          </h1>
-          <p className="text-gray-600 mb-6">
-            No demo data found. Go back and enter Demo Mode first.
-          </p>
-          <Link
-            href="/"
-            className="inline-block bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-6 py-3 rounded-xl shadow-md"
-          >
-            ← Back to Home
-          </Link>
-        </div>
-      </main>
-    );
-  }
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-emerald-50 to-white px-6 py-10">
@@ -234,7 +330,7 @@ export default function PartyPage() {
         <div>
           <h1 className="text-3xl font-bold text-emerald-700">👥 Lab Group</h1>
           <p className="text-gray-600">
-            Peer accountability drives behavior change. Join a group, complete quests, and hit a shared savings goal.
+            Real users, real parties, real progress. Weekly totals come from quest completions.
           </p>
         </div>
 
@@ -251,81 +347,82 @@ export default function PartyPage() {
           >
             🎯 Quests
           </Link>
+          <button
+            onClick={() => setInviteOpen(true)}
+            disabled={!activeParty}
+            className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-5 py-3 rounded-xl shadow-md border border-emerald-200 disabled:opacity-50"
+          >
+            📩 Invite
+          </button>
         </div>
       </div>
 
-      {/* Progress + party summary */}
       <div className="max-w-5xl mx-auto grid md:grid-cols-3 gap-6 mb-8">
         <Card>
-          <CardTitle>🏁 Weekly Goal Progress</CardTitle>
-          <div className="text-4xl font-bold text-emerald-700">{Math.round(progressPct)}%</div>
+          <CardTitle>🏁 Weekly Goal</CardTitle>
+          <div className="text-4xl font-bold text-emerald-700">{progress.pct}%</div>
           <div className="text-sm text-gray-600 mt-1">
-            Est. saved: <span className="font-semibold">{formatMoney(estSaved)}</span> /{" "}
-            <span className="font-semibold">{formatMoney(goal)}</span>
+            Saved: <span className="font-semibold">{formatMoneyCents(progress.totalSaved)}</span> /{" "}
+            <span className="font-semibold">{formatMoneyCents(progress.goal)}</span>
           </div>
           <div className="h-2 rounded-full bg-emerald-100 overflow-hidden mt-4">
-            <div className="h-2 bg-emerald-600" style={{ width: `${progressPct}%` }} />
+            <div className="h-2 bg-emerald-600" style={{ width: `${progress.pct}%` }} />
           </div>
-          <div className="mt-4 text-xs text-gray-500">
-            Demo uses quest completions as “estimated saved.” Later: integrate transactions/CSV.
-          </div>
-        </Card>
-
-        <Card>
-          <CardTitle>🧪 Active Group</CardTitle>
           {activeParty ? (
-            <>
-              <div className="text-sm text-gray-600">
-                Name: <span className="font-semibold text-gray-800">{activeParty.name}</span>
-              </div>
-              <div className="text-sm text-gray-600">
-                Join code:{" "}
-                <span className="font-mono font-semibold text-emerald-700">{activeParty.joinCode}</span>
-              </div>
-              <div className="text-sm text-gray-600 mt-2">
-                Weekly goal: <span className="font-semibold">{formatMoney(activeParty.weeklyGoal)}</span>
-              </div>
-
-              <div className="mt-5 flex gap-2">
-                <button
-                  onClick={resetParty}
-                  className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200"
-                >
-                  Reset
-                </button>
-                {!party ? (
-                  <button
-                    onClick={joinDemoParty}
-                    className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-4 py-2 rounded-xl"
-                  >
-                    Use Demo Group
-                  </button>
-                ) : null}
-              </div>
-            </>
-          ) : (
-            <div className="text-gray-600 text-sm">
-              No group yet — create or join below.
+            <div className="mt-3 text-xs text-gray-500">
+              Active: <span className="font-semibold">{activeParty.name}</span>
             </div>
+          ) : (
+            <div className="mt-3 text-xs text-gray-500">No active party selected.</div>
           )}
         </Card>
 
         <Card>
-          <CardTitle>🤝 Social Mechanic</CardTitle>
-          <p className="text-sm text-gray-600">
-            “Cheer” a teammate to keep momentum. It’s lightweight, but it demonstrates the RBC requirement:
-            <span className="font-semibold"> peer engagement drives behavior change.</span>
-          </p>
-          <div className="mt-4 text-xs text-gray-500">
-            Later: add comments, streak reminders, and shared challenges.
+          <CardTitle>🧪 Your Parties</CardTitle>
+          {myParties.length === 0 ? (
+            <p className="text-sm text-gray-600">You’re not in any parties yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {myParties.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => setActiveParty(p)}
+                  className={`w-full text-left rounded-xl border px-4 py-3 transition ${
+                    activeParty?.id === p.id
+                      ? "bg-emerald-50 border-emerald-200"
+                      : "bg-white hover:bg-emerald-50 border-emerald-100"
+                  }`}
+                >
+                  <div className="font-semibold text-gray-800">{p.name}</div>
+                  <div className="text-xs text-gray-500">
+                    Code: <span className="font-mono">{p.join_code}</span> • Goal:{" "}
+                    {formatMoneyCents(p.weekly_goal_cents)}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-4 flex gap-2">
+            <button
+              onClick={refreshAll}
+              disabled={busy}
+              className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
+            >
+              Refresh
+            </button>
+            <button
+              onClick={leaveParty}
+              disabled={busy || !activeParty}
+              className="bg-white hover:bg-emerald-50 transition text-emerald-700 font-semibold px-4 py-2 rounded-xl border border-emerald-200 disabled:opacity-60"
+            >
+              Leave Active
+            </button>
           </div>
         </Card>
-      </div>
 
-      {/* Create / Join */}
-      <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-6 mb-8">
         <Card>
-          <CardTitle>➕ Create a Lab Group</CardTitle>
+          <CardTitle>➕ Create / Join</CardTitle>
 
           <div className="flex gap-2 mb-4">
             <button
@@ -352,130 +449,169 @@ export default function PartyPage() {
 
           {mode === "create" ? (
             <div className="space-y-3">
-              <Field label="Group name">
+              <Field label="Party name">
                 <input
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
                   placeholder="Burnaby Savers"
-                  className="w-full rounded-xl border border-emerald-200 px-4 py-2 outline-none focus:ring-2 focus:ring-emerald-200"
+                  className={INPUT_CLASS}
                 />
               </Field>
 
-              <Field label="Join code">
-                <input
-                  value={codeInput}
-                  onChange={(e) => setCodeInput(e.target.value)}
-                  placeholder="JEKYLL"
-                  className="w-full rounded-xl border border-emerald-200 px-4 py-2 outline-none focus:ring-2 focus:ring-emerald-200"
-                />
-              </Field>
-
-              <Field label="Weekly savings goal (CAD)">
+              <Field label="Weekly goal (CAD)">
                 <input
                   value={goalInput}
                   onChange={(e) => setGoalInput(e.target.value)}
-                  placeholder="60"
                   inputMode="numeric"
-                  className="w-full rounded-xl border border-emerald-200 px-4 py-2 outline-none focus:ring-2 focus:ring-emerald-200"
+                  placeholder="60"
+                  className={INPUT_CLASS}
                 />
               </Field>
 
-              <button
-                onClick={handleCreate}
-                className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-5 py-3 rounded-xl shadow-md"
-              >
-                Create Group
-              </button>
-
               <div className="text-xs text-gray-500">
-                Hackathon version stores groups locally. Supabase version makes it real-time multiplayer.
+                Join code will be auto-generated. After creating, use <span className="font-semibold">Invite</span>.
               </div>
+
+              <button
+                onClick={createParty}
+                disabled={busy}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-5 py-3 rounded-xl shadow-md disabled:opacity-60"
+              >
+                {busy ? "Working..." : "Create Party"}
+              </button>
             </div>
           ) : (
             <div className="space-y-3">
               <Field label="Enter join code">
                 <input
-                  value={codeInput}
-                  onChange={(e) => setCodeInput(e.target.value)}
+                  value={joinCodeInput}
+                  onChange={(e) => setJoinCodeInput(e.target.value)}
                   placeholder="JEKYLL"
-                  className="w-full rounded-xl border border-emerald-200 px-4 py-2 outline-none focus:ring-2 focus:ring-emerald-200"
+                  className={INPUT_CLASS}
                 />
               </Field>
 
               <button
-                onClick={handleJoin}
-                className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-5 py-3 rounded-xl shadow-md"
+                onClick={joinParty}
+                disabled={busy || !joinCodeInput.trim()}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-5 py-3 rounded-xl shadow-md disabled:opacity-60"
               >
-                Join Group
+                {busy ? "Working..." : "Join Party"}
               </button>
-
-              <div className="text-xs text-gray-500">
-                In the full build, this would find a real group by code and add you as a member.
-              </div>
             </div>
           )}
         </Card>
+      </div>
 
-        {/* Leaderboard */}
+      <div className="max-w-5xl mx-auto grid md:grid-cols-2 gap-6">
         <Card>
-          <CardTitle>🏅 Leaderboard</CardTitle>
+          <CardTitle>🏅 Leaderboard (This Week)</CardTitle>
           {activeParty ? (
-            <div className="space-y-2">
-              {activeParty.members
-                .slice()
-                .sort((a, b) => b.points - a.points)
-                .map((m) => (
+            leaderboard.length ? (
+              <div className="space-y-2">
+                {leaderboard.map((r) => (
                   <div
-                    key={m.name}
+                    key={r.user_id}
                     className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3"
                   >
                     <div>
-                      <div className="font-medium text-gray-800">{m.name}</div>
-                      <div className="text-xs text-gray-500">{m.points} pts</div>
+                      <div className="font-semibold text-gray-800">{r.name}</div>
+                      <div className="text-xs text-gray-500">{r.points} pts</div>
                     </div>
-
-                    <button
-                      onClick={() => cheer(m.name)}
-                      className="bg-white hover:bg-emerald-100 transition text-emerald-700 font-semibold px-3 py-2 rounded-xl border border-emerald-200 text-sm"
-                    >
-                      👏 Cheer
-                    </button>
+                    <div className="font-semibold text-emerald-700">
+                      {formatMoneyCents(r.saved_cents)}
+                    </div>
                   </div>
                 ))}
-
-              <div className="mt-4 text-sm text-gray-600">
-                <span className="font-semibold">Pitch line:</span> “Even lightweight social feedback increases follow-through.”
               </div>
+            ) : (
+              <p className="text-sm text-gray-600">No completions yet this week. Go do some quests 😈</p>
+            )
+          ) : (
+            <p className="text-sm text-gray-600">Select a party to view leaderboard.</p>
+          )}
+        </Card>
+
+        <Card>
+          <CardTitle>👥 Members</CardTitle>
+          {activeParty ? (
+            <div className="space-y-2">
+              {members.map((m) => (
+                <div
+                  key={m.user_id}
+                  className="flex items-center justify-between gap-3 bg-white border border-emerald-100 rounded-xl px-4 py-3"
+                >
+                  <div className="font-medium text-gray-800">
+                    {m.user_id === userId ? "You" : m.user_id.slice(0, 8)}
+                  </div>
+                  <div className="text-xs text-gray-500 font-mono">{m.user_id.slice(0, 8)}</div>
+                </div>
+              ))}
             </div>
           ) : (
-            <div className="text-gray-600 text-sm">
-              Create or join a group to see the leaderboard.
-            </div>
+            <p className="text-sm text-gray-600">Select a party to see members.</p>
           )}
         </Card>
       </div>
 
-      {/* Footer tip */}
-      <div className="max-w-5xl mx-auto text-xs text-gray-500">
-        Tip: For judging, emphasize that the group goal is driven by your weekly chaos level (calendar density + bills + social load).
-      </div>
+      {/* Invite modal */}
+      {inviteOpen && activeParty ? (
+        <div
+          className="fixed inset-0 bg-black/30 flex items-center justify-center px-4 z-50"
+          onClick={() => {
+            setInviteOpen(false);
+            setCopied(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-emerald-100 p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-emerald-700">📩 Invite to {activeParty.name}</h3>
+                <p className="text-sm text-gray-600 mt-1">Share this join code:</p>
+              </div>
+              <button
+                className="text-gray-500 hover:text-gray-700"
+                onClick={() => {
+                  setInviteOpen(false);
+                  setCopied(false);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="mt-4 bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-center justify-between gap-3">
+              <div className="font-mono text-xl font-bold text-emerald-800 tracking-widest">
+                {activeParty.join_code}
+              </div>
+              <button
+                onClick={copyInvite}
+                className="bg-emerald-600 hover:bg-emerald-700 transition text-white font-semibold px-4 py-2 rounded-xl shadow-md"
+              >
+                {copied ? "Copied ✓" : "Copy"}
+              </button>
+            </div>
+
+            <div className="mt-4 text-xs text-gray-500">
+              Tip: open an incognito window, login with another email, and join using this code to demo real multiplayer.
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
 
 /* UI helpers */
 function Card({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="bg-white rounded-2xl shadow-lg border border-emerald-100 p-6">
-      {children}
-    </div>
-  );
+  return <div className="bg-white rounded-2xl shadow-lg border border-emerald-100 p-6">{children}</div>;
 }
 
 function CardTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <h2 className="text-lg font-semibold text-emerald-700 mb-4">{children}</h2>
-  );
+  return <h2 className="text-lg font-semibold text-emerald-700 mb-4">{children}</h2>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
